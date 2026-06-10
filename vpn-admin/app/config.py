@@ -106,6 +106,25 @@ _DEFAULTS: dict = {
     # outage.
     "outbound_probe_targets": ["1.1.1.1:443", "8.8.8.8:443", "9.9.9.9:443"],
     "outbound_probe_interval_sec": 30,
+
+    # PARTIAL-outage detection. The anycast probe above only catches a TOTAL
+    # uplink loss; a provider transit/peering fault can blackhole big chunks of
+    # the internet (e.g. AWS-hosted Twitch, game servers) while Cloudflare/Google
+    # anycast stay reachable — so the dashboard looks green while users can't
+    # load anything. These are REAL, network-diverse service endpoints (different
+    # clouds/CDNs); when >= reachability_alert_fails of them time out at once
+    # while anycast is still up, that's a partial transit outage → TG alert.
+    "reachability_targets": [
+        "gql.twitch.tv:443",          # Twitch (AWS)
+        "ec2.amazonaws.com:443",      # AWS baseline
+        "www.youtube.com:443",        # Google
+        "discord.com:443",            # Discord (chat)
+        "store.steampowered.com:443",  # Steam (games)
+        "www.microsoft.com:443",      # Microsoft / Azure
+        "www.cloudflare.com:443",     # Cloudflare
+    ],
+    "reachability_alert_fails": 2,    # alert when >= this many targets unreachable
+    "reachability_timeout_sec": 4,
 }
 
 # settings the web UI is allowed to persist (subset of keys above)

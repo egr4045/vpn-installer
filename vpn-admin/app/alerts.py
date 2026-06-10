@@ -145,6 +145,51 @@ async def eval_outbound_alert(probe: dict):
         _save_alerts()
 
 
+async def eval_reachability_alert(reach: dict, anycast_up: bool):
+    """Fire/clear a TG alert on a PARTIAL outage: several real, network-diverse
+    services unreachable at once while anycast (CF/Google) is still up — the
+    signature of a provider transit/peering fault that blackholes part of the
+    internet (AWS/Twitch, game servers) but looks green on the basic watchdog.
+
+    Skip entirely when anycast is down too: that's a TOTAL outage already covered
+    by eval_outbound_alert (avoid double-paging). Streak of 2 to debounce."""
+    cfg = config.get_settings()
+    need = cfg.get("reachability_alert_fails", 2)
+    total = reach.get("total", 0)
+    if not total:
+        return
+    fails = total - (reach.get("reachable") or 0)
+    partial = fails >= need
+    key = "reach"
+    state = ALERTS.get(key) if isinstance(ALERTS.get(key), dict) else {"streak": 0, "alerted": False}
+
+    if not anycast_up:
+        # Total uplink outage — owned by eval_outbound_alert. Hold our state and
+        # stay silent so we don't emit a false "restored" while things are worse.
+        return
+
+    if partial:
+        state["streak"] = state.get("streak", 0) + 1
+        if state["streak"] >= 2 and not state.get("alerted"):
+            state["alerted"] = True
+            down = ", ".join(t["target"] for t in reach.get("targets", []) if not t["ok"])
+            await tg_send(
+                "🟠 <b>Частичная потеря связи (похоже на транзит провайдера)</b>\n"
+                f"Сервер не достучался до {fails}/{total} контрольных сервисов, "
+                "при этом Cloudflare/Google отвечают.\n"
+                f"Недоступны: {down}\n"
+                "Симптом: часть сайтов/игр/стримов не грузится у всех. "
+                "Лечится на стороне хостера (можно завести тикет).")
+        ALERTS[key] = state
+        _save_alerts()
+    else:
+        if state.get("alerted"):
+            await tg_send("🟢 <b>Связь восстановлена</b>\n"
+                          f"Доступно {reach.get('reachable')}/{total} контрольных сервисов.")
+        ALERTS[key] = {"streak": 0, "alerted": False}
+        _save_alerts()
+
+
 async def eval_server_alerts():
     import asyncio
 

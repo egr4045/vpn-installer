@@ -177,6 +177,42 @@ def last_outbound() -> dict:
     return dict(_LAST_OUTBOUND)
 
 
+_LAST_REACH: dict = {"ts": None, "reachable": None, "total": 0, "pct": None, "targets": []}
+
+
+def reachability_probe() -> dict:
+    """Partial-outage check: TCP-connect to several REAL, network-diverse service
+    endpoints (Twitch/AWS, Google, Discord, Steam, MS, Cloudflare) in parallel.
+    A provider transit fault can blackhole some of these while anycast (1.1.1.1
+    etc.) stays up — that's invisible to outbound_probe but very visible to users.
+    Returns reachable/total + pct + per-target detail. Parallel, so total wall
+    time ≈ one timeout even if everything is down."""
+    from concurrent.futures import ThreadPoolExecutor
+    cfg = config.get_settings()
+    targets = cfg.get("reachability_targets") or []
+    timeout = cfg.get("reachability_timeout_sec", 4)
+    if not targets:
+        return dict(_LAST_REACH)
+
+    def _one(t):
+        host, port = _parse_hostport(t, 443)
+        ms = _tcp_probe(host, port, timeout=timeout)
+        return {"target": host, "ok": ms is not None, "lat_ms": ms}
+
+    with ThreadPoolExecutor(max_workers=len(targets)) as ex:
+        res = list(ex.map(_one, targets))
+    reachable = sum(1 for r in res if r["ok"])
+    out = {"ts": _dt.datetime.utcnow().isoformat() + "Z", "reachable": reachable,
+           "total": len(res), "pct": round(reachable / len(res) * 100) if res else None,
+           "targets": res}
+    _LAST_REACH.update(out)
+    return out
+
+
+def last_reach() -> dict:
+    return dict(_LAST_REACH)
+
+
 def core_status() -> dict:
     """Are the xray / sing-box cores alive? (api reachability)."""
     from . import singbox_ctl, xray_ctl

@@ -609,6 +609,33 @@ async def health_page(request: Request):
     else:
         ob_card = ""
 
+    # partial-reachability to real services (catches provider transit faults that
+    # the anycast uplink probe above misses)
+    rc = health.last_reach()
+    if rc.get("ts"):
+        rc_total = rc.get("total") or 0
+        rc_ok = rc.get("reachable") or 0
+        rc_fail = rc_total - rc_ok
+        rc_targets = " · ".join(
+            f'{_esc(t["target"])} ' +
+            (badge("ok", f'{t["lat_ms"]}ms') if t["ok"] else badge("crit", "timeout"))
+            for t in rc.get("targets", []))
+        if rc_fail == 0:
+            rc_state = badge("ok", "OK")
+        elif rc_fail >= cfg.get("reachability_alert_fails", 2):
+            rc_state = badge("crit", "ЧАСТИЧНЫЙ ОБРЫВ")
+        else:
+            rc_state = badge("warn", "деградация")
+        reach_card = (
+            f'<div class="card"><div class="card-title">Доступность сервисов (из ЦОД)</div>'
+            f'<div style="margin-bottom:8px">{rc_state} доступно {rc_ok}/{rc_total} '
+            f'<span style="color:#64748b;font-size:11px">· обновлено {lt(rc["ts"])}</span></div>'
+            f'<div style="font-size:13px">{rc_targets}</div>'
+            f'<div style="font-size:11px;color:#64748b;margin-top:6px">Twitch/AWS, игры, чат и CDN — '
+            f'если часть таймаутит, а аплинк выше «OK», это проблема транзита хостера (не сервера).</div></div>')
+    else:
+        reach_card = ""
+
     # SLA (month-to-date), provider/internet outages excluded
     _mtd = datetime.now(timezone.utc).strftime("%Y-%m-01T00:00:00.000Z")
     sla = await asyncio.to_thread(store.sla_stats, _mtd)
@@ -652,7 +679,7 @@ async def health_page(request: Request):
 
     _since = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     series = {k: await asyncio.to_thread(store.metric_series, k, _since)
-              for k in ("cpu_pct", "mem_pct", "disk_pct", "net_rx_mbps", "net_tx_mbps")}
+              for k in ("cpu_pct", "mem_pct", "disk_pct", "net_rx_mbps", "net_tx_mbps", "reach_pct")}
     metrics_card = (
         '<div class="card"><div class="card-title">Метрики сервера · 3 часа</div>'
         '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:16px">'
@@ -661,6 +688,7 @@ async def health_page(request: Request):
         f'<div><div style="font-size:11px;color:#64748b">Диск, %</div>{_svg_line(series["disk_pct"], "#a855f7", "%")}</div>'
         f'<div><div style="font-size:11px;color:#64748b">Сеть ↓, Mbit/s</div>{_svg_line(series["net_rx_mbps"], "#4ade80")}</div>'
         f'<div><div style="font-size:11px;color:#64748b">Сеть ↑, Mbit/s</div>{_svg_line(series["net_tx_mbps"], "#22d3ee")}</div>'
+        f'<div><div style="font-size:11px;color:#64748b">Доступность сервисов, %</div>{_svg_line(series["reach_pct"], "#f43f5e", "%")}</div>'
         '</div></div>'
         '<script>function cleanDisk(b){if(!confirm("Очистить место? Удалятся docker build-cache, висящие образы и старые системные логи. Активные данные не затрагиваются."))return;'
         'b.disabled=true;var m=document.getElementById("diskmsg");m.textContent="Чищу…";'
@@ -750,7 +778,7 @@ async def health_page(request: Request):
     )
     body = (f'<h2 style="margin-bottom:16px">Здоровье VPN</h2>'
             f'<div style="font-size:12px;color:#64748b;margin-bottom:16px">обновлено {lt(sh["ts"])} · <a href="/health">обновить</a></div>'
-            f'{alerts_card}{proto_card}{res_card}{disk_card}{ob_card}{sla_card}{metrics_card}{uptime_card}{net_card}{cli_card}{hc_card}')
+            f'{alerts_card}{proto_card}{res_card}{disk_card}{ob_card}{reach_card}{sla_card}{metrics_card}{uptime_card}{net_card}{cli_card}{hc_card}')
     return HTMLResponse(page("Здоровье", body, csrf=tok))
 
 
@@ -1180,6 +1208,12 @@ async def _start_bg():
                 await alerts.eval_outbound_alert(probe)
                 cores = await asyncio.to_thread(health.core_status)
 
+                # PARTIAL-outage detection: are real services (Twitch/AWS, games,
+                # chat) reachable, or only anycast? Catches provider transit
+                # faults that the anycast probe misses.
+                reach = await asyncio.to_thread(health.reachability_probe)
+                await alerts.eval_reachability_alert(reach, anycast_up=probe.get("reachable", 0) > 0)
+
                 # classify this tick for SLA (provider outages excluded)
                 if probe.get("total", 0) > 0 and probe.get("reachable", 0) == 0:
                     kind = "provider_down"
@@ -1189,8 +1223,10 @@ async def _start_bg():
                     kind = "up"
                 await asyncio.to_thread(store.record_sla, kind)
 
-                # time-series metrics (CPU/mem/disk/net/udp-drops) for the dashboard
-                await asyncio.to_thread(lambda: store.record_metrics(health.collect_metrics()))
+                # time-series metrics (CPU/mem/disk/net/udp-drops + reachability)
+                _m = health.collect_metrics()
+                _m["reach_pct"] = reach.get("pct")
+                await asyncio.to_thread(lambda: store.record_metrics(_m))
 
                 # self-heal: restart a wedged core, but never during a provider
                 # outage (restarting can't fix a dead uplink). One restart per
