@@ -44,6 +44,13 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: #3b82f6
 .alert-ok  { background: #14532d; color: #4ade80; }
 .copy-btn { background: #2d3148; border: none; color: #94a3b8; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
 .copy-btn:hover { color: #fff; }
+.help { margin: 8px 0; background: #0f1117; border: 1px solid #2d3148; border-radius: 6px; }
+.help > summary { cursor: pointer; padding: 8px 12px; color: #60a5fa; font-size: 13px; font-weight: 600; list-style: none; user-select: none; }
+.help > summary::-webkit-details-marker { display: none; }
+.help[open] > summary { border-bottom: 1px solid #2d3148; }
+.help > ol, .help > div, .help > a { padding-left: 12px; padding-right: 12px; }
+.help > a { display: inline-block; margin: 0 0 10px 12px; color: #60a5fa; font-size: 12px; }
+.form-group select { width: 100%; padding: 8px 10px; background: #0f1117; border: 1px solid #2d3148; border-radius: 6px; color: #e2e8f0; }
 """
 
 TOAST_HTML = ('<div id="toast" style="position:fixed;bottom:24px;left:50%;transform:translateX(-50%) '

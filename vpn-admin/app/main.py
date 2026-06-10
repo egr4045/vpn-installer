@@ -6,6 +6,8 @@ from the original admin; routes rewired to the store.
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, unquote
 
@@ -691,36 +693,306 @@ async def tg_test(request: Request):
 
 
 # ── settings (Phase A: read-only overview; Phase B: full editing) ─────────────
+# ── guided help: "что это, куда идти, что нажать, что даст" ────────────────────
+HELP = {
+    "telegram": ("Зачем и как получить токен бота",
+                 ["Откройте <b>@BotFather</b> в Telegram → команда <code>/newbot</code>.",
+                  "Задайте имя и username бота → BotFather пришлёт <b>токен</b> вида <code>123456:AA…</code>.",
+                  "Вставьте токен сюда и нажмите «Сохранить», затем «Тест».",
+                  "Напишите своему боту любое сообщение — чат определится автоматически."],
+                 "Даёт: алерты в Telegram (протокол упал, нет связи, лимиты трафика, истекает серт).",
+                 "https://t.me/BotFather"),
+    "provider": ("Где взять API-ключ хостера (трафик-виджет)",
+                 ["Зайдите в личный кабинет хостера → раздел API.",
+                  "Создайте/скопируйте API-ключ и ID сервера.",
+                  "Для HOSTKEY поля URL уже заполнены пресетом — впишите только ключ и server_id.",
+                  "Нажмите «Сохранить», затем «Проверить» — покажет распарсенные цифры."],
+                 "Даёт: баннер «использовано X из лимита» и алерты при приближении к лимиту трафика.",
+                 ""),
+    "domains": ("Домены и их роли",
+                ["<b>admin</b> — где открывается панель и отдаются подписки.",
+                 "<b>direct</b> — DNS-only (серой тучкой), сюда идут Reality/Hy2/TUIC.",
+                 "<b>cdn</b> — через Cloudflare (оранжевая тучка), сюда идёт httpupgrade-транспорт.",
+                 "<b>apex</b> — голый домен/www, только как serverName для Reality.",
+                 "После смены доменов нужен НОВЫЙ сертификат (кнопка ниже) и перезапуск nginx."],
+                "Даёт: добавление/смену доменов без переустановки. Reality serverNames обновятся сразу.",
+                "https://dash.cloudflare.com/profile/api-tokens"),
+    "cert": ("Сертификаты Let's Encrypt",
+             ["«Обновить сертификаты» запускает <code>certbot renew</code> — безопасно, продлевает только то, что близко к истечению.",
+              "После успешного продления nginx перезапускается, чтобы подхватить новый серт.",
+              "Для нового домена сперва добавьте его выше и направьте DNS на сервер."],
+             "Даёт: продление TLS без простоя. Срок текущих сертов виден на странице «Здоровье».",
+             ""),
+    "account": ("Смена логина/пароля админки",
+                ["Введите текущий пароль для подтверждения.",
+                 "Задайте новый логин и/или пароль (пусто = не менять).",
+                 "Сессия останется активной; новый пароль действует сразу."],
+                "Даёт: смену доступа к панели без перезапуска.",
+                ""),
+}
+
+
+def _help(key: str) -> str:
+    h = HELP.get(key)
+    if not h:
+        return ""
+    title, steps, gives, link = h
+    li = "".join(f"<li>{s}</li>" for s in steps)
+    lnk = f'<a href="{link}" target="_blank" rel="noopener">Открыть страницу →</a>' if link else ""
+    return (f'<details class="help"><summary>? {title}</summary>'
+            f'<ol style="margin:8px 0 6px 18px;padding:0;font-size:13px;line-height:1.6">{li}</ol>'
+            f'<div style="font-size:12px;color:#4ade80;margin-bottom:4px">{gives}</div>{lnk}</details>')
+
+
+def _esc(s) -> str:
+    return str(s or "").replace("&", "&amp;").replace("<", "&lt;").replace('"', "&quot;")
+
+
+def _mask(s) -> str:
+    s = str(s or "")
+    return (s[:4] + "…" + s[-4:]) if len(s) > 10 else ("—" if not s else s)
+
+
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
     if not _auth(request):
         return RedirectResponse("/login", status_code=302)
-    d = cfg.as_dict()
-    def mask(s):
-        s = str(s or "")
-        return (s[:6] + "…" + s[-4:]) if len(s) > 12 else "—"
+    c = config.get_settings()
+    d = c.as_dict()
+    prov = d.get("provider", {}) or {}
+    ht = ",".join(str(x) for x in d.get("host_thresholds", []))
+    ut = ",".join(str(x) for x in d.get("user_thresholds", []))
+
+    general = f"""
+<div class="card"><div class="card-title">Основные</div>
+<form method="post" action="/settings/save">
+  <div class="form-group"><label>Бренд</label><input name="brand" value="{_esc(d.get('brand'))}"></div>
+  <div class="form-group"><label>База подписки (URL)</label><input name="sub_https_base" value="{_esc(d.get('sub_https_base'))}"></div>
+  <div class="form-group"><label>Пороги алертов хостинга, %</label><input name="host_thresholds" value="{_esc(ht)}"></div>
+  <div class="form-group"><label>Пороги алертов пользователя, %</label><input name="user_thresholds" value="{_esc(ut)}"></div>
+  <hr style="border-color:#2d3148;margin:14px 0">
+  <div class="form-group"><label>Telegram bot token <span style="color:#64748b">(пусто = не менять, текущий {_mask(d.get('tg_bot_token'))})</span></label>
+    <input name="tg_bot_token" placeholder="123456:AA…"></div>
+  {_help("telegram")}
+  <div style="display:flex;gap:8px;margin-top:10px">
+    <button class="btn btn-primary btn-sm">Сохранить</button>
+    <button type="button" class="btn btn-ghost btn-sm" onclick="fetch('/api/tg/test').then(r=>r.json()).then(d=>showToast(d.sent?'Алерт отправлен':'Нет chat_id — напишите боту'))">Тест Telegram</button>
+  </div>
+</form></div>"""
+
+    provider_card = f"""
+<div class="card"><div class="card-title">Провайдер-трафик (хостер)</div>
+<form method="post" action="/settings/provider">
+  <div class="form-group"><label><input type="checkbox" name="enabled" {'checked' if prov.get('enabled') else ''}> включить виджет</label></div>
+  <div class="form-group"><label>Название</label><input name="name" value="{_esc(prov.get('name'))}"></div>
+  <div class="form-group"><label>Auth URL</label><input name="auth_url" value="{_esc(prov.get('auth_url'))}"></div>
+  <div class="form-group"><label>Data URL</label><input name="data_url" value="{_esc(prov.get('data_url'))}"></div>
+  <div class="form-group"><label>API key <span style="color:#64748b">(пусто = не менять, текущий {_mask(prov.get('api_key'))})</span></label><input name="api_key" placeholder="••••"></div>
+  <div class="form-group"><label>Server ID</label><input name="server_id" value="{_esc(prov.get('server_id'))}"></div>
+  {_help("provider")}
+  <div style="display:flex;gap:8px;margin-top:10px">
+    <button class="btn btn-primary btn-sm">Сохранить</button>
+    <button type="button" class="btn btn-ghost btn-sm" onclick="fetch('/api/provider/test',{{method:'POST'}}).then(r=>r.json()).then(d=>showToast(d.ok?('Использовано '+d.used+' / лимит '+d.limit):'Ошибка: '+(d.error||'')))">Проверить</button>
+  </div>
+</form></div>"""
+
     dom_rows = "".join(
-        f'<tr><td>{x["domain"]}</td><td>{x["role"]}</td><td>{"CF proxy" if x.get("proxied") else "—"}</td></tr>'
+        f'<tr><td>{_esc(x["domain"])}</td><td>{_esc(x.get("role"))}</td>'
+        f'<td>{"CF" if x.get("proxied") else "—"}</td>'
+        f'<td><form method="post" action="/settings/domains" style="margin:0">'
+        f'<input type="hidden" name="action" value="del"><input type="hidden" name="domain" value="{_esc(x["domain"])}">'
+        f'<button class="btn btn-ghost btn-sm" onclick="return confirm(\'Убрать домен?\')">✕</button></form></td></tr>'
         for x in d.get("domains", []))
-    prov = d.get("provider", {})
-    body = f"""
-<div class="card"><div class="card-title">Настройки (просмотр)</div>
-<div style="font-size:13px;color:#94a3b8;margin-bottom:12px">Полное редактирование через веб появится в Phase B; пока правится через env/.env и перезапуск.</div>
-<table>
-  <tr><th>Параметр</th><th>Значение</th></tr>
-  <tr><td>Бренд</td><td>{d.get('brand')}</td></tr>
-  <tr><td>IP сервера</td><td>{d.get('server_ip')}</td></tr>
-  <tr><td>База подписки</td><td>{d.get('sub_https_base')}</td></tr>
-  <tr><td>Reality SNI / порт</td><td>{d.get('reality_sni')} : {d.get('reality_port')}</td></tr>
-  <tr><td>Reality pubkey</td><td><code>{d.get('reality_public_key')}</code></td></tr>
-  <tr><td>CDN домен</td><td>{d.get('cdn_domain')} ({d.get('hu_path')})</td></tr>
-  <tr><td>Hy2 / TUIC / TCP порты</td><td>{d.get('hy2_port')} · {d.get('tuic_port')} · {d.get('tcp_port')}</td></tr>
-  <tr><td>TG bot token</td><td>{mask(d.get('tg_bot_token'))}</td></tr>
-  <tr><td>Провайдер-виджет</td><td>{prov.get('name')} ({'вкл' if prov.get('enabled') else 'выкл'}) · key {mask(prov.get('api_key'))}</td></tr>
-</table></div>
+    domains_card = f"""
 <div class="card"><div class="card-title">Домены</div>
-<table><tr><th>Домен</th><th>Роль</th><th>CF</th></tr>{dom_rows}</table></div>"""
+<table><tr><th>Домен</th><th>Роль</th><th>CF</th><th></th></tr>{dom_rows or '<tr><td colspan=4 style=color:#64748b>Доменов нет</td></tr>'}</table>
+<form method="post" action="/settings/domains" style="display:flex;gap:8px;align-items:end;margin-top:12px;flex-wrap:wrap">
+  <input type="hidden" name="action" value="add">
+  <div class="form-group" style="margin:0"><label>Новый домен</label><input name="domain" placeholder="cdn.example.com"></div>
+  <div class="form-group" style="margin:0"><label>Роль</label><select name="role">
+    <option>admin</option><option>direct</option><option>cdn</option><option>apex</option></select></div>
+  <label style="font-size:13px"><input type="checkbox" name="proxied"> за Cloudflare</label>
+  <button class="btn btn-primary btn-sm">Добавить</button>
+</form>
+{_help("domains")}</div>"""
+
+    svc_card = f"""
+<div class="card"><div class="card-title">Сервис и сертификаты</div>
+<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+  <button class="btn btn-ghost btn-sm" onclick="svc('xray')">↻ xray</button>
+  <button class="btn btn-ghost btn-sm" onclick="svc('sing-box')">↻ sing-box</button>
+  <button class="btn btn-ghost btn-sm" onclick="svc('nginx')">↻ nginx</button>
+  <button class="btn btn-ghost btn-sm" onclick="renewCert(this)">Обновить сертификаты</button>
+  <span id="svcmsg" style="font-size:12px;color:#94a3b8;align-self:center"></span>
+</div>
+{_help("cert")}</div>"""
+
+    account_card = f"""
+<div class="card"><div class="card-title">Аккаунт админа</div>
+<form method="post" action="/settings/account">
+  <div class="form-group"><label>Логин</label><input name="admin_user" value="{_esc(d.get('admin_user'))}"></div>
+  <div class="form-group"><label>Текущий пароль</label><input type="password" name="current"></div>
+  <div class="form-group"><label>Новый пароль <span style="color:#64748b">(пусто = не менять)</span></label><input type="password" name="newpass"></div>
+  {_help("account")}
+  <button class="btn btn-primary btn-sm" style="margin-top:10px">Сохранить</button>
+</form></div>"""
+
+    ro = (f'<div class="card"><div class="card-title">Только для чтения (правится в .env / визарде)</div>'
+          f'<div style="font-size:13px;color:#94a3b8;line-height:1.8">IP: {_esc(d.get("server_ip"))} · '
+          f'Reality pubkey: <code>{_esc(d.get("reality_public_key"))}</code> · порты Hy2/TUIC/TCP: '
+          f'{d.get("hy2_port")}/{d.get("tuic_port")}/{d.get("tcp_port")}</div></div>')
+
+    js = ("<script>"
+          "function svc(n){if(!confirm('Перезапустить '+n+'? Активные сессии на этом ядре кратко прервутся.'))return;"
+          "var m=document.getElementById('svcmsg');m.textContent='Перезапуск '+n+'…';"
+          "fetch('/api/service/restart',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'name='+n})"
+          ".then(r=>r.json()).then(d=>{m.textContent=d.ok?(n+': ок'):(n+': '+(d.error||'ошибка'));});}"
+          "function renewCert(b){if(!confirm('Запустить certbot renew? Безопасно: продлит только то, что близко к истечению.'))return;"
+          "b.disabled=true;var m=document.getElementById('svcmsg');m.textContent='certbot renew…';"
+          "fetch('/api/cert/renew',{method:'POST'}).then(r=>r.json()).then(d=>{m.textContent=d.ok?('Серты: '+d.msg):('Ошибка: '+(d.error||''));b.disabled=false;});}"
+          "</script>")
+
+    body = (general + provider_card + domains_card + svc_card + account_card + ro + js)
     return HTMLResponse(page("Настройки", body))
+
+
+def _refresh_cfg():
+    global cfg
+    cfg = config.reload_settings()
+
+
+@app.post("/settings/save")
+async def settings_save(request: Request, brand: str = Form(""), sub_https_base: str = Form(""),
+                        host_thresholds: str = Form(""), user_thresholds: str = Form(""),
+                        tg_bot_token: str = Form("")):
+    if not _auth(request):
+        return RedirectResponse("/login", status_code=302)
+
+    def _ints(s):
+        return [int(x) for x in s.replace(" ", "").split(",") if x.strip().isdigit()]
+    updates = {"brand": brand.strip(), "sub_https_base": sub_https_base.strip(),
+               "host_thresholds": _ints(host_thresholds), "user_thresholds": _ints(user_thresholds)}
+    if tg_bot_token.strip():
+        updates["tg_bot_token"] = tg_bot_token.strip()
+    config.save_web_settings(updates)
+    _refresh_cfg()
+    return RedirectResponse("/settings", status_code=302)
+
+
+@app.post("/settings/provider")
+async def settings_provider(request: Request, name: str = Form(""), auth_url: str = Form(""),
+                            data_url: str = Form(""), api_key: str = Form(""), server_id: str = Form(""),
+                            enabled: str = Form("")):
+    if not _auth(request):
+        return RedirectResponse("/login", status_code=302)
+    prov = dict(config.get_settings().provider or {})
+    prov.update({"enabled": bool(enabled), "name": name.strip(), "auth_url": auth_url.strip(),
+                 "data_url": data_url.strip(), "server_id": server_id.strip()})
+    if api_key.strip():
+        prov["api_key"] = api_key.strip()
+    config.save_web_settings({"provider": prov})
+    _refresh_cfg()
+    return RedirectResponse("/settings", status_code=302)
+
+
+@app.post("/settings/account")
+async def settings_account(request: Request, admin_user: str = Form(""),
+                           current: str = Form(""), newpass: str = Form("")):
+    if not _auth(request):
+        return RedirectResponse("/login", status_code=302)
+    if not verify_pass(current):
+        return RedirectResponse("/settings?e=badpass", status_code=302)
+    updates = {}
+    if admin_user.strip():
+        updates["admin_user"] = admin_user.strip()
+    if newpass:
+        updates["admin_pass"] = newpass
+        global _PASS_HASH
+        _PASS_HASH = _bcrypt.hashpw(newpass.encode(), _bcrypt.gensalt())
+    if updates:
+        config.save_web_settings(updates)
+        _refresh_cfg()
+    return RedirectResponse("/settings", status_code=302)
+
+
+@app.post("/settings/domains")
+async def settings_domains(request: Request, action: str = Form(""), domain: str = Form(""),
+                           role: str = Form("direct"), proxied: str = Form("")):
+    if not _auth(request):
+        return RedirectResponse("/login", status_code=302)
+    doms = [dict(x) for x in (config.get_settings().domains or [])]
+    domain = domain.strip().lower()
+    if action == "add" and domain:
+        doms = [x for x in doms if x.get("domain") != domain]
+        doms.append({"domain": domain, "role": role, "proxied": bool(proxied)})
+    elif action == "del" and domain:
+        doms = [x for x in doms if x.get("domain") != domain]
+    config.save_web_settings({"domains": doms})
+    _refresh_cfg()
+    # reality serverNames derive from domains — re-render xray (hot, no client break)
+    try:
+        await asyncio.to_thread(lambda: render.write_xray_config(store.list_users(), cfg))
+        await asyncio.to_thread(xray_ctl.restart)
+    except Exception:
+        pass
+    return RedirectResponse("/settings", status_code=302)
+
+
+@app.post("/api/provider/test")
+async def provider_test(request: Request):
+    if not _auth(request):
+        return JSONResponse({"ok": False, "error": "auth"}, status_code=401)
+    try:
+        await provider.refresh_provider(force=True)
+        p = json.load(open(os.path.join(config.DATA_DIR, "provider.json")))
+        return JSONResponse({"ok": True, "used": p.get("used_gb", p.get("used", "?")),
+                             "limit": p.get("limit_gb", p.get("limit", "?"))})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)[:120]})
+
+
+@app.post("/api/service/restart")
+async def service_restart(request: Request, name: str = Form(...)):
+    if not _auth(request):
+        return JSONResponse({"ok": False, "error": "auth"}, status_code=401)
+    ctl = {"xray": xray_ctl, "singbox": singbox_ctl, "sing-box": singbox_ctl}.get(name)
+    if not ctl:
+        # nginx (no ctl module) — validate then docker restart
+        if name == "nginx":
+            import subprocess
+            v = await asyncio.to_thread(lambda: subprocess.run(
+                ["docker", "exec", cfg.nginx_container, "nginx", "-t"], capture_output=True, text=True, timeout=20))
+            if v.returncode != 0:
+                return JSONResponse({"ok": False, "error": "nginx -t failed"})
+            r = await asyncio.to_thread(lambda: subprocess.run(
+                ["docker", "restart", cfg.nginx_container], capture_output=True, text=True, timeout=60))
+            return JSONResponse({"ok": r.returncode == 0})
+        return JSONResponse({"ok": False, "error": "unknown service"})
+    # xray: validate config before restart (known inode trap)
+    if ctl is xray_ctl:
+        good, _out = await asyncio.to_thread(xray_ctl.test_config)
+        if not good:
+            return JSONResponse({"ok": False, "error": "xray -test failed"})
+    ok, out = await asyncio.to_thread(ctl.restart)
+    return JSONResponse({"ok": bool(ok), "error": ("" if ok else (out or "")[:120])})
+
+
+@app.post("/api/cert/renew")
+async def cert_renew(request: Request):
+    if not _auth(request):
+        return JSONResponse({"ok": False, "error": "auth"}, status_code=401)
+    import subprocess
+
+    def _renew():
+        r = subprocess.run(["docker", "run", "--rm", "-v", "/etc/letsencrypt:/etc/letsencrypt",
+                            "certbot/certbot", "renew", "--quiet"], capture_output=True, text=True, timeout=300)
+        subprocess.run(["docker", "restart", cfg.nginx_container], capture_output=True, text=True, timeout=60)
+        return r.returncode, (r.stdout or "") + (r.stderr or "")
+    try:
+        rc, out = await asyncio.to_thread(_renew)
+        return JSONResponse({"ok": rc == 0, "msg": "обновлены и nginx перезапущен" if rc == 0 else (out[:120] or "ошибка")})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)[:120]})
 
 
 # ── background loop ───────────────────────────────────────────────────────────

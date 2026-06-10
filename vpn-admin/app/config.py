@@ -111,7 +111,7 @@ _DEFAULTS: dict = {
 # settings the web UI is allowed to persist (subset of keys above)
 WEB_EDITABLE = {
     "brand", "domains", "sub_https_base", "sub_mirrors", "reality_sni",
-    "hy2_up_mbps", "hy2_down_mbps", "admin_user", "tg_bot_token",
+    "hy2_up_mbps", "hy2_down_mbps", "admin_user", "admin_pass", "tg_bot_token",
     "host_thresholds", "user_thresholds", "provider",
 }
 
