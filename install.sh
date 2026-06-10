@@ -38,11 +38,16 @@ systemctl enable --now vpn-net-tuning.service 2>/dev/null || true
 ok "tuning applied"
 
 # ── 30 firewall ───────────────────────────────────────────────────────────────
+# NOTE: 8080 (admin panel) is deliberately NOT opened to the internet. The panel
+# is reached only via nginx-TLS on the admin domain (:443); nginx talks to the
+# admin over loopback (127.0.0.1:8080), which ufw does not filter. For direct
+# access before DNS/TLS is ready, use an SSH tunnel:  ssh -L 8080:127.0.0.1:8080
 say "Configuring ufw"
 ufw allow 22/tcp >/dev/null; ufw allow 80/tcp >/dev/null
-for p in 443/tcp 443/udp 8443/tcp 8444/udp 9443/udp 2080/tcp 8080/tcp; do ufw allow "$p" >/dev/null; done
+for p in 443/tcp 443/udp 8443/tcp 8444/udp 9443/udp 2080/tcp; do ufw allow "$p" >/dev/null; done
+ufw delete allow 8080/tcp >/dev/null 2>&1 || true   # close it if a previous run opened it
 ufw --force enable >/dev/null
-ok "firewall up"
+ok "firewall up (admin :8080 stays loopback-only)"
 
 # ── 40 wizard → .env ──────────────────────────────────────────────────────────
 if [ -f .env ]; then
@@ -138,8 +143,9 @@ docker compose up -d
 ok "stack is up"
 
 # ── 80 first user + 90 verify ────────────────────────────────────────────────
-say "Done. Admin: https://$ADMIN_DOMAIN  (or http://$SERVER_IP:8080)"
+say "Done. Admin: https://$ADMIN_DOMAIN"
 echo "  login: $ADMIN_USER   password: $ADMIN_PASS"
+echo "  (port 8080 is firewalled; for direct access use: ssh -L 8080:127.0.0.1:8080 root@$SERVER_IP )"
 echo "  create your first user in the admin → Users, then scan the subscription QR."
 say "Verifying listeners"
 sleep 3; ss -tulnp 2>/dev/null | grep -E ':(443|8443|9443|8444|2080|8080)\b' | awk '{print "  "$1" "$5}' || true

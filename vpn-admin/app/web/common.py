@@ -111,10 +111,13 @@ def badge(level: str, text: str) -> str:
     return f'<span class="badge {cls}">{text}</span>'
 
 
-def page(title: str, body: str, brand: str = "VPN", banner: str = "", nav_extra: str = "") -> str:
+def page(title: str, body: str, brand: str = "VPN", banner: str = "", nav_extra: str = "",
+         csrf: str = "") -> str:
+    csrf_js = f'<script>window.CSRF={csrf!r};</script>' if csrf else ""
     return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{title} · {brand} Admin</title>
+{csrf_js}
 <style>{CSS}</style></head><body>
 <nav class="nav">
   <span class="nav-brand">{brand} Admin</span>

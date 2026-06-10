@@ -16,4 +16,7 @@ COPY templates /app/templates
 COPY scripts /app/scripts
 
 ENV VPN_TEMPLATE_DIR=/app/templates
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+# Honour X-Forwarded-Proto/For from the local nginx (loopback only) so the app
+# sees the real https scheme + client IP behind the TLS terminator.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", \
+     "--proxy-headers", "--forwarded-allow-ips", "127.0.0.1"]

@@ -211,6 +211,25 @@ class Settings:
         return [d["domain"] for d in self._data.get("domains", [])
                 if d.get("role") in ("admin", "cdn", "direct", "apex")]
 
+    def admin_base(self) -> str:
+        """Public HTTPS base of the admin/panel (no trailing slash).
+
+        Derived from sub_https_base (…/sub) so the Windows healthcheck reports
+        through nginx-TLS on the admin domain instead of the raw :8080 port,
+        which is firewalled off the internet. Falls back to the admin-role
+        domain, then to http://IP:8080 for a not-yet-fronted bootstrap box.
+        """
+        base = (self._data.get("sub_https_base") or "").rstrip("/")
+        if base.endswith("/sub"):
+            base = base[:-4]
+        if base:
+            return base
+        admin = self.domain_by_role("admin")
+        if admin:
+            return f"https://{admin}"
+        ip = self._data.get("server_ip") or "127.0.0.1"
+        return f"http://{ip}:8080"
+
 
 def load() -> dict:
     cfg = json.loads(json.dumps(_DEFAULTS))  # deep copy

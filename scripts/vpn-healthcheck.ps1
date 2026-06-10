@@ -7,7 +7,7 @@
   Цикл:    powershell -ExecutionPolicy Bypass -File .\vpn-healthcheck.ps1 -Loop
 #>
 param(
-  [string]$AdminUrl  = "http://__SERVER_IP__:8080/api/health/report",
+  [string]$AdminUrl  = "__ADMIN_BASE__/api/health/report",
   [string]$Token     = "__HEALTH_TOKEN__",
   [string]$Server    = "__SERVER_IP__",
   [string]$Direct    = "__DIRECT_DOMAIN__",

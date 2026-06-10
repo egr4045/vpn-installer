@@ -16,12 +16,16 @@ Transforms:
 Usage: extract-xray-from-live.py <live-config.json> <users.json> <out.json>
 """
 import json
+import os
 import sys
 
 API_PORT = 10085
 PRIMARY_CERT_DIR = "/etc/letsencrypt/live/example.com"   # parametrised in Phase B
 DIRECT_SNI = "direct.example.com"
-DROP_SERVERNAMES = {"anti-eblan-node.duckdns.org"}
+# Legacy serverName(s) to strip from the Reality steal inbound during migration.
+# Set via env (comma-separated) so no real hostname is baked into the repo, e.g.
+#   DROP_SERVERNAMES=old-node.example.org python extract-xray-from-live.py ...
+DROP_SERVERNAMES = {s.strip() for s in os.environ.get("DROP_SERVERNAMES", "").split(",") if s.strip()}
 
 
 def uuid_to_username(users_path):

@@ -1,11 +1,11 @@
 <#
   __BRAND__ VPN - установщик healthcheck в Планировщик задач (запуск полностью невидимый, без кражи фокуса).
-  Поставить:  iwr http://__SERVER_IP__:8080/health/install -OutFile install.ps1
+  Поставить:  iwr __ADMIN_BASE__/health/install -OutFile install.ps1
               powershell -ExecutionPolicy Bypass -File .\install.ps1
   Удалить:    schtasks /Delete /TN "__BRAND__VPN-Healthcheck" /F
 #>
 param(
-  [string]$ScriptUrl = "http://__SERVER_IP__:8080/health/script",
+  [string]$ScriptUrl = "__ADMIN_BASE__/health/script",
   [int]$IntervalMin  = 10,
   [string]$TaskName  = "__BRAND__VPN-Healthcheck"
 )

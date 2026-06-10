@@ -23,7 +23,17 @@ from .web import common
 from .web.common import badge, fmt_bytes, lt
 
 cfg = config.get_settings()
+
+# Refuse to boot with unprovisioned critical secrets: an empty secret_key makes
+# session cookies forgeable, an empty admin_pass means a blank-password login.
+# The install wizard always generates both; this guard catches misconfiguration.
+if not cfg.secret_key or not cfg.admin_pass:
+    raise RuntimeError(
+        "SECRET_KEY and ADMIN_PASS must be set (run the install wizard or fill .env); "
+        "refusing to start with empty session-signing key / admin password.")
+
 signer = URLSafeTimedSerializer(cfg.secret_key)
+csrf_signer = URLSafeTimedSerializer(cfg.secret_key, salt="vpn-csrf")
 _PASS_HASH = _bcrypt.hashpw(cfg.admin_pass.encode(), _bcrypt.gensalt())
 
 app = FastAPI()
@@ -43,13 +53,95 @@ def get_session(request: Request):
         return None
 
 
-def set_session(response: Response, username: str):
-    response.set_cookie("session", signer.dumps(username), httponly=True, max_age=86400 * 7)
+def set_session(response: Response, username: str, request: Request | None = None):
+    # httponly: no JS access. samesite=strict: the cookie is never attached to
+    #   cross-site requests, which closes CSRF on every state-changing route.
+    #   secure: set when the request arrived over HTTPS (the production path is
+    #   nginx-TLS, which forwards X-Forwarded-Proto). Left off for a plain-HTTP
+    #   bootstrap/SSH-tunnel session so the operator isn't locked out before TLS.
+    secure = bool(request and request.url.scheme == "https")
+    response.set_cookie("session", signer.dumps(username), httponly=True,
+                        secure=secure, samesite="strict", max_age=86400 * 7)
 
 
-def page(title: str, body: str, nav_extra: str = "") -> str:
+# ── CSRF (defence-in-depth on top of SameSite=strict) ─────────────────────────
+def csrf_token(username: str) -> str:
+    return csrf_signer.dumps(username)
+
+
+async def _csrf_valid(request: Request, username: str) -> bool:
+    tok = request.headers.get("x-csrf-token", "")
+    if not tok:
+        try:
+            form = await request.form()
+            tok = str(form.get("csrf") or "")
+        except Exception:
+            tok = ""
+    if not tok:
+        return False
+    try:
+        return csrf_signer.loads(tok, max_age=86400 * 7) == username
+    except Exception:
+        return False
+
+
+async def _guard(request: Request, json: bool = False):
+    """Auth + CSRF gate for state-changing handlers. Returns the username on
+    success, or a Response (redirect / 401 / 403) to return immediately."""
+    user = get_session(request)
+    if not user:
+        return (JSONResponse({"ok": False, "error": "auth"}, status_code=401)
+                if json else RedirectResponse("/login", status_code=302))
+    if not await _csrf_valid(request, user):
+        return (JSONResponse({"ok": False, "error": "csrf"}, status_code=403)
+                if json else RedirectResponse("/login?error=CSRF", status_code=302))
+    return user
+
+
+# ── login brute-force throttle (per source IP, in-memory) ─────────────────────
+import time as _time
+
+_LOGIN_FAILS: dict = {}   # ip -> [timestamps of recent failures]
+_LOGIN_WINDOW = 300       # seconds
+_LOGIN_MAX = 8            # failures per window before lockout
+
+
+def _login_blocked(ip: str) -> bool:
+    now = _time.time()
+    hits = [t for t in _LOGIN_FAILS.get(ip, []) if now - t < _LOGIN_WINDOW]
+    _LOGIN_FAILS[ip] = hits
+    return len(hits) >= _LOGIN_MAX
+
+
+def _login_fail(ip: str) -> None:
+    _LOGIN_FAILS.setdefault(ip, []).append(_time.time())
+
+
+def _login_ok(ip: str) -> None:
+    _LOGIN_FAILS.pop(ip, None)
+
+
+# ── security headers on every response ────────────────────────────────────────
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    resp = await call_next(request)
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    # inline styles/scripts are used throughout the UI, so 'unsafe-inline' is
+    # required; frame-ancestors 'none' + no remote script origins still blocks
+    # clickjacking and loading attacker-hosted scripts.
+    resp.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+        "frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+    return resp
+
+
+def page(title: str, body: str, nav_extra: str = "", csrf: str = "") -> str:
     return common.page(title, body, brand=cfg.brand,
-                       banner=provider.provider_banner(), nav_extra=nav_extra)
+                       banner=provider.provider_banner(csrf), nav_extra=nav_extra, csrf=csrf)
 
 
 def _auth(request: Request):
@@ -77,11 +169,16 @@ async def login_page(error: str = ""):
 
 
 @app.post("/login")
-async def login_post(username: str = Form(...), password: str = Form(...)):
+async def login_post(request: Request, username: str = Form(...), password: str = Form(...)):
+    ip = request.client.host if request.client else "?"
+    if _login_blocked(ip):
+        return RedirectResponse("/login?error=Слишком+много+попыток,+подождите", status_code=302)
     if username == cfg.admin_user and verify_pass(password):
+        _login_ok(ip)
         r = RedirectResponse("/users", status_code=302)
-        set_session(r, username)
+        set_session(r, username, request)
         return r
+    _login_fail(ip)
     return RedirectResponse("/login?error=Неверный+логин+или+пароль", status_code=302)
 
 
@@ -104,8 +201,11 @@ _BADGE = {"ACTIVE": ("badge-ok", "Активен"), "DISABLED": ("badge-off", "�
 
 @app.get("/users", response_class=HTMLResponse)
 async def users_list(request: Request):
-    if not _auth(request):
+    user = get_session(request)
+    if not user:
         return RedirectResponse("/login", status_code=302)
+    tok = csrf_token(user)
+    csrf_input = f'<input type="hidden" name="csrf" value="{tok}">'
     await provider.refresh_provider()
     users = store.list_users()
     if provider.PROVIDER.get("limit_gb"):
@@ -146,9 +246,9 @@ async def users_list(request: Request):
 <td>
   <a class="btn btn-sm btn-primary" href="{sub_url}" target="_blank">Подписка</a>
   <button class="btn btn-sm copy-btn" onclick="copyText(this,'{sub_url}/raw')">Ссылка</button>
-  <a class="btn btn-sm {toggle_cls}" href="/users/{u['id']}/toggle">{toggle_label}</a>
+  <form method="post" action="/users/{u['id']}/toggle" style="display:inline">{csrf_input}<button class="btn btn-sm {toggle_cls}">{toggle_label}</button></form>
   <a class="btn btn-sm btn-ghost" href="/users/{u['id']}/edit">Изм.</a>
-  <a class="btn btn-sm btn-danger" href="/users/{u['id']}/delete" onclick="return confirm('Удалить {u['username']}?')">✕</a>
+  <form method="post" action="/users/{u['id']}/delete" style="display:inline" onsubmit="return confirm('Удалить {u['username']}?')">{csrf_input}<button class="btn btn-sm btn-danger">✕</button></form>
 </td></tr>"""
 
     body = f"""
@@ -159,19 +259,22 @@ async def users_list(request: Request):
     <tbody>{rows or '<tr><td colspan="6" style="color:#64748b;text-align:center;padding:30px">Нет пользователей</td></tr>'}</tbody>
   </table>
 </div>"""
-    return HTMLResponse(page("Пользователи", body))
+    return HTMLResponse(page("Пользователи", body, csrf=tok))
 
 
 @app.get("/users/create", response_class=HTMLResponse)
 async def create_form(request: Request, error: str = ""):
-    if not _auth(request):
+    user = get_session(request)
+    if not user:
         return RedirectResponse("/login", status_code=302)
+    tok = csrf_token(user)
     err = f'<div class="alert alert-err">{error}</div>' if error else ""
     body = f"""
 <div style="max-width:480px"><div class="card">
   <div class="card-title">Новый пользователь</div>
   {err}
   <form method="post" action="/users/create">
+    <input type="hidden" name="csrf" value="{tok}">
     <div class="form-group"><label>Имя (латиница, без пробелов)</label><input name="username" required pattern="[A-Za-z0-9_-]+"></div>
     <div class="form-group"><label>Лимит трафика, ГБ (0 = безлимит)</label>
       <input type="number" name="traffic_gb" value="0" min="0" step="10" placeholder="например 800"></div>
@@ -186,14 +289,16 @@ async def create_form(request: Request, error: str = ""):
     </div>
   </form>
 </div></div>"""
-    return HTMLResponse(page("Создать", body))
+    return HTMLResponse(page("Создать", body, csrf=tok))
 
 
 @app.post("/users/create")
 async def create_user(request: Request, username: str = Form(...),
-                      traffic_gb: int = Form(0), expire_days: int = Form(0)):
-    if not _auth(request):
-        return RedirectResponse("/login", status_code=302)
+                      traffic_gb: int = Form(0), expire_days: int = Form(0),
+                      csrf: str = Form("")):
+    g = await _guard(request)
+    if not isinstance(g, str):
+        return g
     if store.get_by_username(username):
         return RedirectResponse(f"/users/create?error={quote('Имя уже занято')}", status_code=302)
     if expire_days > 0:
@@ -208,10 +313,11 @@ async def create_user(request: Request, username: str = Form(...),
     return RedirectResponse("/users", status_code=302)
 
 
-@app.get("/users/{uid}/toggle")
+@app.post("/users/{uid}/toggle")
 async def toggle_user(request: Request, uid: int):
-    if not _auth(request):
-        return RedirectResponse("/login", status_code=302)
+    g = await _guard(request)
+    if not isinstance(g, str):
+        return g
     u = store.get_by_id(uid)
     if u:
         if u["status"] == "ACTIVE":
@@ -227,8 +333,10 @@ async def toggle_user(request: Request, uid: int):
 
 @app.get("/users/{uid}/edit", response_class=HTMLResponse)
 async def edit_form(request: Request, uid: int, error: str = ""):
-    if not _auth(request):
+    user = get_session(request)
+    if not user:
         return RedirectResponse("/login", status_code=302)
+    tok = csrf_token(user)
     u = store.get_by_id(uid)
     if not u:
         return RedirectResponse("/users", status_code=302)
@@ -241,6 +349,7 @@ async def edit_form(request: Request, uid: int, error: str = ""):
   <div class="card-title">Изменить — {u['username']}</div>
   {err}
   <form method="post" action="/users/{uid}/edit">
+    <input type="hidden" name="csrf" value="{tok}">
     <div class="form-group"><label>Лимит трафика, ГБ (0 = безлимит)</label>
       <input type="number" name="traffic_gb" value="{cur_gb}" min="0" step="10"></div>
     <div class="form-group"><label>Действует до (пусто = бессрочно)</label>
@@ -250,16 +359,21 @@ async def edit_form(request: Request, uid: int, error: str = ""):
       <a class="btn btn-ghost" href="/users">Отмена</a>
     </div>
   </form>
-  <div style="margin-top:14px"><a class="btn btn-sm btn-ghost" href="/users/{uid}/reset" onclick="return confirm('Обнулить счётчик трафика?')">Обнулить трафик</a></div>
+  <form method="post" action="/users/{uid}/reset" style="margin-top:14px" onsubmit="return confirm('Обнулить счётчик трафика?')">
+    <input type="hidden" name="csrf" value="{tok}">
+    <button class="btn btn-sm btn-ghost">Обнулить трафик</button>
+  </form>
 </div></div>"""
-    return HTMLResponse(page("Изменить", body))
+    return HTMLResponse(page("Изменить", body, csrf=tok))
 
 
 @app.post("/users/{uid}/edit")
 async def edit_user(request: Request, uid: int,
-                    traffic_gb: int = Form(0), expire_date: str = Form("")):
-    if not _auth(request):
-        return RedirectResponse("/login", status_code=302)
+                    traffic_gb: int = Form(0), expire_date: str = Form(""),
+                    csrf: str = Form("")):
+    g = await _guard(request)
+    if not isinstance(g, str):
+        return g
     store.update_user(
         uid,
         traffic_limit=traffic_gb * 1024 ** 3 if traffic_gb > 0 else 0,
@@ -272,10 +386,11 @@ async def edit_user(request: Request, uid: int,
     return RedirectResponse("/users", status_code=302)
 
 
-@app.get("/users/{uid}/reset")
+@app.post("/users/{uid}/reset")
 async def reset_user(request: Request, uid: int):
-    if not _auth(request):
-        return RedirectResponse("/login", status_code=302)
+    g = await _guard(request)
+    if not isinstance(g, str):
+        return g
     store.reset_traffic(uid)
     if await asyncio.to_thread(enforcement.enforce):
         await asyncio.to_thread(render.write_singbox_config)
@@ -283,10 +398,11 @@ async def reset_user(request: Request, uid: int):
     return RedirectResponse("/users", status_code=302)
 
 
-@app.get("/users/{uid}/delete")
+@app.post("/users/{uid}/delete")
 async def delete_user(request: Request, uid: int):
-    if not _auth(request):
-        return RedirectResponse("/login", status_code=302)
+    g = await _guard(request)
+    if not isinstance(g, str):
+        return g
     u = store.get_by_id(uid)
     if u:
         await asyncio.to_thread(xray_ctl.remove_user, u["username"])
@@ -447,8 +563,10 @@ async def health_report(request: Request):
 
 @app.get("/health", response_class=HTMLResponse)
 async def health_page(request: Request):
-    if not _auth(request):
+    user = get_session(request)
+    if not user:
         return RedirectResponse("/login", status_code=302)
+    tok = csrf_token(user)
     sh = await asyncio.to_thread(health.server_health)
     cores = await asyncio.to_thread(health.core_status)
 
@@ -546,20 +664,25 @@ async def health_page(request: Request):
         '</div></div>'
         '<script>function cleanDisk(b){if(!confirm("Очистить место? Удалятся docker build-cache, висящие образы и старые системные логи. Активные данные не затрагиваются."))return;'
         'b.disabled=true;var m=document.getElementById("diskmsg");m.textContent="Чищу…";'
-        'fetch("/api/disk/clean",{method:"POST"}).then(r=>r.json()).then(d=>{m.textContent=d.ok?("Освобождено ~"+d.freed_mb+" МБ · свободно "+d.free_gb+" ГБ"):("Ошибка: "+(d.error||""));b.disabled=false;})'
+        'fetch("/api/disk/clean",{method:"POST",headers:{"X-CSRF-Token":window.CSRF}}).then(r=>r.json()).then(d=>{m.textContent=d.ok?("Освобождено ~"+d.freed_mb+" МБ · свободно "+d.free_gb+" ГБ"):("Ошибка: "+(d.error||""));b.disabled=false;})'
         '.catch(e=>{m.textContent="Ошибка сети";b.disabled=false;});}</script>')
 
+    # All values below come from the client-posted health report (authed by a
+    # widely-distributed bearer token), so every field is treated as untrusted
+    # and HTML-escaped to prevent stored XSS in the admin dashboard.
     cli = ""
     for r in list(health.HEALTH_REPORTS)[-5:][::-1]:
-        host = r.get("host", r.get("_from", "?"))
+        host = _esc(r.get("host", r.get("_from", "?")))
         when = lt(r.get("_received", ""))
         cells = ""
-        for name, info in r.get("results", {}).items():
+        for name, info in (r.get("results", {}) or {}).items():
+            info = info if isinstance(info, dict) else {}
             ok, ms = info.get("ok"), info.get("ms")
-            b = badge("ok", f'{ms}ms' if ms is not None else "ok") if ok else badge("crit", "fail")
-            cells += f'<td style="text-align:center"><div style="font-size:11px;color:#94a3b8">{name}</div>{b}</td>'
-        yt = r.get("youtube", {})
-        yt_str = f'{yt.get("mbps")} Mbps' if (yt and yt.get("mbps") is not None) else "—"
+            ms_txt = _esc(ms) if ms is not None else "ok"
+            b = badge("ok", f'{ms_txt}ms' if ms is not None else "ok") if ok else badge("crit", "fail")
+            cells += f'<td style="text-align:center"><div style="font-size:11px;color:#94a3b8">{_esc(name)}</div>{b}</td>'
+        yt = r.get("youtube", {}) or {}
+        yt_str = f'{_esc(yt.get("mbps"))} Mbps' if (isinstance(yt, dict) and yt.get("mbps") is not None) else "—"
         cli += (f'<tr><td>{when}<br><span style="font-size:11px;color:#64748b">{host}</span></td>'
                 f'{cells}<td style="text-align:center"><div style="font-size:11px;color:#94a3b8">YouTube</div>{yt_str}</td></tr>')
     if not cli:
@@ -575,13 +698,14 @@ async def health_page(request: Request):
         okc = sum(1 for r in recent if (r.get("results") or {}).get(p, {}).get("ok"))
         pct = round(okc / tot * 100) if tot else 0
         col = "#4ade80" if pct >= 99 else ("#f59e0b" if pct >= 80 else "#ef4444")
-        up_rows += (f'<tr><td style="width:90px">{p}</td>'
+        up_rows += (f'<tr><td style="width:90px">{_esc(p)}</td>'
                     f'<td><div style="background:#0f1117;border-radius:4px;height:8px"><div style="height:100%;width:{pct}%;background:{col};border-radius:4px"></div></div></td>'
                     f'<td style="text-align:right;color:{col};white-space:nowrap">{pct}% <span style="color:#64748b;font-size:11px">({okc}/{tot})</span></td></tr>')
     uptime_card = (f'<div class="card"><div class="card-title">Аптайм протоколов · последние {len(recent)} проверок</div>'
                    f'<table style="table-layout:fixed">{up_rows or "<tr><td>нет данных от клиентов</td></tr>"}</table></div>')
 
     def _spark(vals, color, h=30):
+        vals = [v if isinstance(v, (int, float)) and not isinstance(v, bool) else None for v in vals]
         present = [v for v in vals if v is not None]
         if not present:
             return '<span style="color:#64748b;font-size:12px">нет данных</span>'
@@ -591,7 +715,7 @@ async def health_page(request: Request):
             if v is None:
                 bars += '<div style="width:4px;height:1px;background:#2d3148"></div>'
             else:
-                bars += f'<div style="width:4px;height:{max(2, round(v / mx * h))}px;background:{color};border-radius:1px" title="{v}"></div>'
+                bars += f'<div style="width:4px;height:{max(2, round(v / mx * h))}px;background:{color};border-radius:1px" title="{_esc(v)}"></div>'
         return f'<div style="display:flex;align-items:flex-end;gap:2px;height:{h}px">{bars}</div>'
 
     pings = [(r.get("youtube") or {}).get("ping_ms") for r in recent]
@@ -603,16 +727,16 @@ async def health_page(request: Request):
     net_card = (
         '<div class="card"><div class="card-title">Сеть клиента</div>'
         '<div style="display:flex;gap:24px;flex-wrap:wrap;font-size:13px;margin-bottom:12px">'
-        f'<div>Ping: <b>{_ping if _ping is not None else "—"} ms</b></div>'
-        f'<div>Потери: <b>{_loss if _loss is not None else "—"}%</b></div>'
-        f'<div>Скорость: <b>{last_speed if last_speed is not None else "—"} Mbps</b> '
+        f'<div>Ping: <b>{_esc(_ping) if _ping is not None else "—"} ms</b></div>'
+        f'<div>Потери: <b>{_esc(_loss) if _loss is not None else "—"}%</b></div>'
+        f'<div>Скорость: <b>{_esc(last_speed) if last_speed is not None else "—"} Mbps</b> '
         '<span style="color:#64748b;font-size:11px">(замер раз в час)</span></div></div>'
         f'<div style="font-size:11px;color:#64748b;margin-bottom:4px">Ping, мс</div>{_spark(pings, "#3b82f6")}'
         f'<div style="font-size:11px;color:#64748b;margin:10px 0 4px">Скорость, Mbps</div>{_spark(speeds, "#4ade80")}'
         '</div>'
     )
 
-    install_cmd = (f"iwr http://{cfg.server_ip}:8080/health/install -OutFile install.ps1; "
+    install_cmd = (f"iwr {cfg.admin_base()}/health/install -OutFile install.ps1; "
                    "powershell -ExecutionPolicy Bypass -File install.ps1")
     hc_card = (
         '<div class="card"><div class="card-title">Healthcheck для Windows</div>'
@@ -627,13 +751,14 @@ async def health_page(request: Request):
     body = (f'<h2 style="margin-bottom:16px">Здоровье VPN</h2>'
             f'<div style="font-size:12px;color:#64748b;margin-bottom:16px">обновлено {lt(sh["ts"])} · <a href="/health">обновить</a></div>'
             f'{alerts_card}{proto_card}{res_card}{disk_card}{ob_card}{sla_card}{metrics_card}{uptime_card}{net_card}{cli_card}{hc_card}')
-    return HTMLResponse(page("Здоровье", body))
+    return HTMLResponse(page("Здоровье", body, csrf=tok))
 
 
 @app.post("/api/disk/clean")
 async def disk_clean(request: Request):
-    if not _auth(request):
-        return JSONResponse({"ok": False, "error": "auth"}, status_code=401)
+    g = await _guard(request, json=True)
+    if not isinstance(g, str):
+        return g
     import shutil as _sh
     import subprocess
     before = _sh.disk_usage("/").free
@@ -658,6 +783,7 @@ def _serve_ps1(path: str, filename: str):
         return PlainTextResponse("script not found", status_code=404)
     # scripts ship with placeholders (no secrets in repo); fill from live config
     for token, val in (("__SERVER_IP__", cfg.server_ip), ("__HEALTH_TOKEN__", cfg.health_token),
+                       ("__ADMIN_BASE__", cfg.admin_base()),
                        ("__DIRECT_DOMAIN__", cfg.direct_domain), ("__CDN_DOMAIN__", cfg.cdn_domain),
                        ("__BRAND__", cfg.brand)):
         txt = txt.replace(token, str(val or ""))
@@ -676,10 +802,11 @@ async def health_install():
 
 
 # ── provider / telegram ───────────────────────────────────────────────────────
-@app.get("/provider/refresh")
+@app.post("/provider/refresh")
 async def provider_refresh_ui(request: Request):
-    if not _auth(request):
-        return RedirectResponse("/login", status_code=302)
+    g = await _guard(request)
+    if not isinstance(g, str):
+        return g
     await provider.refresh_provider(force=True)
     return RedirectResponse("/users", status_code=302)
 
@@ -744,8 +871,14 @@ def _help(key: str) -> str:
             f'<div style="font-size:12px;color:#4ade80;margin-bottom:4px">{gives}</div>{lnk}</details>')
 
 
+import re as _re
+
+# plain DNS hostname (labels of a-z0-9/hyphen, 1+ dot), max 253 chars
+_DOMAIN_RE = _re.compile(r"^(?=.{1,253}$)(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$")
+
+
 def _esc(s) -> str:
-    return str(s or "").replace("&", "&amp;").replace("<", "&lt;").replace('"', "&quot;")
+    return str(s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
 def _mask(s) -> str:
@@ -755,8 +888,11 @@ def _mask(s) -> str:
 
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
-    if not _auth(request):
+    user = get_session(request)
+    if not user:
         return RedirectResponse("/login", status_code=302)
+    tok = csrf_token(user)
+    csrf_input = f'<input type="hidden" name="csrf" value="{tok}">'
     c = config.get_settings()
     d = c.as_dict()
     prov = d.get("provider", {}) or {}
@@ -766,6 +902,7 @@ async def settings_page(request: Request):
     general = f"""
 <div class="card"><div class="card-title">Основные</div>
 <form method="post" action="/settings/save">
+  {csrf_input}
   <div class="form-group"><label>Бренд</label><input name="brand" value="{_esc(d.get('brand'))}"></div>
   <div class="form-group"><label>База подписки (URL)</label><input name="sub_https_base" value="{_esc(d.get('sub_https_base'))}"></div>
   <div class="form-group"><label>Пороги алертов хостинга, %</label><input name="host_thresholds" value="{_esc(ht)}"></div>
@@ -783,6 +920,7 @@ async def settings_page(request: Request):
     provider_card = f"""
 <div class="card"><div class="card-title">Провайдер-трафик (хостер)</div>
 <form method="post" action="/settings/provider">
+  {csrf_input}
   <div class="form-group"><label><input type="checkbox" name="enabled" {'checked' if prov.get('enabled') else ''}> включить виджет</label></div>
   <div class="form-group"><label>Название</label><input name="name" value="{_esc(prov.get('name'))}"></div>
   <div class="form-group"><label>Auth URL</label><input name="auth_url" value="{_esc(prov.get('auth_url'))}"></div>
@@ -792,7 +930,7 @@ async def settings_page(request: Request):
   {_help("provider")}
   <div style="display:flex;gap:8px;margin-top:10px">
     <button class="btn btn-primary btn-sm">Сохранить</button>
-    <button type="button" class="btn btn-ghost btn-sm" onclick="fetch('/api/provider/test',{{method:'POST'}}).then(r=>r.json()).then(d=>showToast(d.ok?('Использовано '+d.used+' / лимит '+d.limit):'Ошибка: '+(d.error||'')))">Проверить</button>
+    <button type="button" class="btn btn-ghost btn-sm" onclick="fetch('/api/provider/test',{{method:'POST',headers:{{'X-CSRF-Token':window.CSRF}}}}).then(r=>r.json()).then(d=>showToast(d.ok?('Использовано '+d.used+' / лимит '+d.limit):'Ошибка: '+(d.error||'')))">Проверить</button>
   </div>
 </form></div>"""
 
@@ -800,6 +938,7 @@ async def settings_page(request: Request):
         f'<tr><td>{_esc(x["domain"])}</td><td>{_esc(x.get("role"))}</td>'
         f'<td>{"CF" if x.get("proxied") else "—"}</td>'
         f'<td><form method="post" action="/settings/domains" style="margin:0">'
+        f'<input type="hidden" name="csrf" value="{tok}">'
         f'<input type="hidden" name="action" value="del"><input type="hidden" name="domain" value="{_esc(x["domain"])}">'
         f'<button class="btn btn-ghost btn-sm" onclick="return confirm(\'Убрать домен?\')">✕</button></form></td></tr>'
         for x in d.get("domains", []))
@@ -807,6 +946,7 @@ async def settings_page(request: Request):
 <div class="card"><div class="card-title">Домены</div>
 <table><tr><th>Домен</th><th>Роль</th><th>CF</th><th></th></tr>{dom_rows or '<tr><td colspan=4 style=color:#64748b>Доменов нет</td></tr>'}</table>
 <form method="post" action="/settings/domains" style="display:flex;gap:8px;align-items:end;margin-top:12px;flex-wrap:wrap">
+  {csrf_input}
   <input type="hidden" name="action" value="add">
   <div class="form-group" style="margin:0"><label>Новый домен</label><input name="domain" placeholder="cdn.example.com"></div>
   <div class="form-group" style="margin:0"><label>Роль</label><select name="role">
@@ -830,6 +970,7 @@ async def settings_page(request: Request):
     account_card = f"""
 <div class="card"><div class="card-title">Аккаунт админа</div>
 <form method="post" action="/settings/account">
+  {csrf_input}
   <div class="form-group"><label>Логин</label><input name="admin_user" value="{_esc(d.get('admin_user'))}"></div>
   <div class="form-group"><label>Текущий пароль</label><input type="password" name="current"></div>
   <div class="form-group"><label>Новый пароль <span style="color:#64748b">(пусто = не менять)</span></label><input type="password" name="newpass"></div>
@@ -845,15 +986,15 @@ async def settings_page(request: Request):
     js = ("<script>"
           "function svc(n){if(!confirm('Перезапустить '+n+'? Активные сессии на этом ядре кратко прервутся.'))return;"
           "var m=document.getElementById('svcmsg');m.textContent='Перезапуск '+n+'…';"
-          "fetch('/api/service/restart',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'name='+n})"
+          "fetch('/api/service/restart',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':window.CSRF},body:'name='+encodeURIComponent(n)})"
           ".then(r=>r.json()).then(d=>{m.textContent=d.ok?(n+': ок'):(n+': '+(d.error||'ошибка'));});}"
           "function renewCert(b){if(!confirm('Запустить certbot renew? Безопасно: продлит только то, что близко к истечению.'))return;"
           "b.disabled=true;var m=document.getElementById('svcmsg');m.textContent='certbot renew…';"
-          "fetch('/api/cert/renew',{method:'POST'}).then(r=>r.json()).then(d=>{m.textContent=d.ok?('Серты: '+d.msg):('Ошибка: '+(d.error||''));b.disabled=false;});}"
+          "fetch('/api/cert/renew',{method:'POST',headers:{'X-CSRF-Token':window.CSRF}}).then(r=>r.json()).then(d=>{m.textContent=d.ok?('Серты: '+d.msg):('Ошибка: '+(d.error||''));b.disabled=false;});}"
           "</script>")
 
     body = (general + provider_card + domains_card + svc_card + account_card + ro + js)
-    return HTMLResponse(page("Настройки", body))
+    return HTMLResponse(page("Настройки", body, csrf=tok))
 
 
 def _refresh_cfg():
@@ -864,9 +1005,10 @@ def _refresh_cfg():
 @app.post("/settings/save")
 async def settings_save(request: Request, brand: str = Form(""), sub_https_base: str = Form(""),
                         host_thresholds: str = Form(""), user_thresholds: str = Form(""),
-                        tg_bot_token: str = Form("")):
-    if not _auth(request):
-        return RedirectResponse("/login", status_code=302)
+                        tg_bot_token: str = Form(""), csrf: str = Form("")):
+    g = await _guard(request)
+    if not isinstance(g, str):
+        return g
 
     def _ints(s):
         return [int(x) for x in s.replace(" ", "").split(",") if x.strip().isdigit()]
@@ -882,9 +1024,10 @@ async def settings_save(request: Request, brand: str = Form(""), sub_https_base:
 @app.post("/settings/provider")
 async def settings_provider(request: Request, name: str = Form(""), auth_url: str = Form(""),
                             data_url: str = Form(""), api_key: str = Form(""), server_id: str = Form(""),
-                            enabled: str = Form("")):
-    if not _auth(request):
-        return RedirectResponse("/login", status_code=302)
+                            enabled: str = Form(""), csrf: str = Form("")):
+    g = await _guard(request)
+    if not isinstance(g, str):
+        return g
     prov = dict(config.get_settings().provider or {})
     prov.update({"enabled": bool(enabled), "name": name.strip(), "auth_url": auth_url.strip(),
                  "data_url": data_url.strip(), "server_id": server_id.strip()})
@@ -897,9 +1040,10 @@ async def settings_provider(request: Request, name: str = Form(""), auth_url: st
 
 @app.post("/settings/account")
 async def settings_account(request: Request, admin_user: str = Form(""),
-                           current: str = Form(""), newpass: str = Form("")):
-    if not _auth(request):
-        return RedirectResponse("/login", status_code=302)
+                           current: str = Form(""), newpass: str = Form(""), csrf: str = Form("")):
+    g = await _guard(request)
+    if not isinstance(g, str):
+        return g
     if not verify_pass(current):
         return RedirectResponse("/settings?e=badpass", status_code=302)
     updates = {}
@@ -917,22 +1061,32 @@ async def settings_account(request: Request, admin_user: str = Form(""),
 
 @app.post("/settings/domains")
 async def settings_domains(request: Request, action: str = Form(""), domain: str = Form(""),
-                           role: str = Form("direct"), proxied: str = Form("")):
-    if not _auth(request):
-        return RedirectResponse("/login", status_code=302)
+                           role: str = Form("direct"), proxied: str = Form(""), csrf: str = Form("")):
+    g = await _guard(request)
+    if not isinstance(g, str):
+        return g
     doms = [dict(x) for x in (config.get_settings().domains or [])]
     domain = domain.strip().lower()
     if action == "add" and domain:
+        # validate: a domain string flows into xray Reality serverNames and the
+        # rendered config. Reject anything that isn't a plain hostname so it
+        # can't break the JSON config or inject unexpected values.
+        if not _DOMAIN_RE.match(domain) or role not in ("admin", "direct", "cdn", "apex"):
+            return RedirectResponse("/settings?e=baddomain", status_code=302)
         doms = [x for x in doms if x.get("domain") != domain]
         doms.append({"domain": domain, "role": role, "proxied": bool(proxied)})
     elif action == "del" and domain:
         doms = [x for x in doms if x.get("domain") != domain]
     config.save_web_settings({"domains": doms})
     _refresh_cfg()
-    # reality serverNames derive from domains — re-render xray (hot, no client break)
+    # reality serverNames derive from domains — re-render xray, but validate the
+    # rendered config (xray -test) before restarting so a bad value can't take
+    # the core down (write to a temp path, test, only then promote + restart).
     try:
         await asyncio.to_thread(lambda: render.write_xray_config(store.list_users(), cfg))
-        await asyncio.to_thread(xray_ctl.restart)
+        good, _out = await asyncio.to_thread(xray_ctl.test_config)
+        if good:
+            await asyncio.to_thread(xray_ctl.restart)
     except Exception:
         pass
     return RedirectResponse("/settings", status_code=302)
@@ -940,8 +1094,9 @@ async def settings_domains(request: Request, action: str = Form(""), domain: str
 
 @app.post("/api/provider/test")
 async def provider_test(request: Request):
-    if not _auth(request):
-        return JSONResponse({"ok": False, "error": "auth"}, status_code=401)
+    g = await _guard(request, json=True)
+    if not isinstance(g, str):
+        return g
     try:
         await provider.refresh_provider(force=True)
         p = json.load(open(os.path.join(config.DATA_DIR, "provider.json")))
@@ -952,9 +1107,10 @@ async def provider_test(request: Request):
 
 
 @app.post("/api/service/restart")
-async def service_restart(request: Request, name: str = Form(...)):
-    if not _auth(request):
-        return JSONResponse({"ok": False, "error": "auth"}, status_code=401)
+async def service_restart(request: Request, name: str = Form(...), csrf: str = Form("")):
+    g = await _guard(request, json=True)
+    if not isinstance(g, str):
+        return g
     ctl = {"xray": xray_ctl, "singbox": singbox_ctl, "sing-box": singbox_ctl}.get(name)
     if not ctl:
         # nginx (no ctl module) — validate then docker restart
@@ -979,8 +1135,9 @@ async def service_restart(request: Request, name: str = Form(...)):
 
 @app.post("/api/cert/renew")
 async def cert_renew(request: Request):
-    if not _auth(request):
-        return JSONResponse({"ok": False, "error": "auth"}, status_code=401)
+    g = await _guard(request, json=True)
+    if not isinstance(g, str):
+        return g
     import subprocess
 
     def _renew():

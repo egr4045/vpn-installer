@@ -199,5 +199,8 @@ def sub_headers(user: dict, short_uuid: str, cfg=None) -> dict:
         "profile-web-page-url": f"{cfg.sub_https_base}/{short_uuid}",
         "support-url": f"{cfg.sub_https_base}/{short_uuid}",
         "subscription-userinfo": f"upload=0; download={used}; total={limit}; expire={expire_ts}",
-        "access-control-allow-origin": "*",
+        # NOTE: no `access-control-allow-origin: *` — these responses carry the
+        # user's VLESS uuid / trojan password. VPN clients fetch them server-side
+        # (not via browser CORS), so omitting ACAO costs nothing and stops any
+        # web page from reading a known sub URL's credentials cross-origin.
     }
