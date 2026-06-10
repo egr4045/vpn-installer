@@ -1,0 +1,12 @@
+[Unit]
+Description=VPN NIC tuning (RPS/RFS/ring buffers)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/vpn-net-tuning.sh
+
+[Install]
+WantedBy=multi-user.target

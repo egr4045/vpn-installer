@@ -1,0 +1,42 @@
+# ── secrets & host-specific state (NEVER commit) ──────────────────────────────
+.env
+.env.*
+!.env.example
+/data/
+**/data/
+*settings.json
+
+# rendered, host-specific compose (repo ships docker-compose.yml.tpl instead)
+docker-compose.yml
+
+# live "gold source" configs extracted from a running box (contain real keys)
+/staging/
+
+# certificates / keys
+*.pem
+*.key
+*.crt
+*.p12
+secrets/
+.secrets/
+
+# backups & migration snapshots
+*.pre-*
+*.candidate.json
+*.bak
+vpn-backup/
+*-backup/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# os / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+PHASE-B-TODO.md

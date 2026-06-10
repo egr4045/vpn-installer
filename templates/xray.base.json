@@ -1,0 +1,267 @@
+{
+  "dns": {
+    "tag": "dns_inbound",
+    "servers": [
+      {
+        "address": "1.1.1.1"
+      },
+      {
+        "address": "8.8.8.8"
+      }
+    ],
+    "disableCache": false,
+    "queryStrategy": "UseIPv4"
+  },
+  "log": {
+    "loglevel": "warning"
+  },
+  "routing": {
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": [
+          "api"
+        ],
+        "outboundTag": "api"
+      },
+      {
+        "ip": [
+          "geoip:private"
+        ],
+        "type": "field",
+        "outboundTag": "BLOCK"
+      },
+      {
+        "type": "field",
+        "protocol": [
+          "bittorrent"
+        ],
+        "outboundTag": "BLOCK"
+      }
+    ]
+  },
+  "inbounds": [
+    {
+      "tag": "api",
+      "listen": "127.0.0.1",
+      "port": 10085,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "127.0.0.1"
+      }
+    },
+    {
+      "tag": "Steal",
+      "port": 443,
+      "protocol": "vless",
+      "settings": {
+        "clients": [],
+        "decryption": "none",
+        "flow": "xtls-rprx-vision"
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "dest": "/dev/shm/nginx.sock",
+          "show": false,
+          "xver": 1,
+          "spiderX": "",
+          "shortIds": [
+            "9cfcab58698d94e8"
+          ],
+          "privateKey": "",
+          "serverNames": [
+            "direct.example.com",
+            "cdn.example.com",
+            "example.com",
+            "www.example.com",
+            "admin.example.com"
+          ]
+        }
+      }
+    },
+    {
+      "tag": "VLESS_XHTTP",
+      "listen": "/dev/shm/xhttp.sock,0666",
+      "protocol": "vless",
+      "settings": {
+        "clients": [],
+        "decryption": "none",
+        "flow": ""
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ]
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "xhttpSettings": {
+          "mode": "auto",
+          "path": "/store"
+        }
+      }
+    },
+    {
+      "tag": "VLESS_HTTPUPGRADE",
+      "listen": "/dev/shm/httpupgrade.sock,0666",
+      "protocol": "vless",
+      "settings": {
+        "clients": [],
+        "decryption": "none",
+        "flow": ""
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ]
+      },
+      "streamSettings": {
+        "network": "httpupgrade",
+        "httpupgradeSettings": {
+          "host": "cdn.example.com",
+          "path": "/probe"
+        }
+      }
+    },
+    {
+      "tag": "VLESS_TCP_2080",
+      "port": 2080,
+      "listen": "0.0.0.0",
+      "protocol": "vless",
+      "settings": {
+        "clients": [],
+        "decryption": "none",
+        "flow": ""
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    },
+    {
+      "tag": "Hysteria2",
+      "port": 8444,
+      "listen": "0.0.0.0",
+      "protocol": "hysteria",
+      "settings": {
+        "clients": []
+      },
+      "streamSettings": {
+        "network": "hysteria",
+        "security": "tls",
+        "tlsSettings": {
+          "alpn": [
+            "h3"
+          ],
+          "serverName": "direct.example.com",
+          "certificates": [
+            {
+              "keyFile": "/etc/letsencrypt/live/example.com/privkey.pem",
+              "certificateFile": "/etc/letsencrypt/live/example.com/fullchain.pem"
+            }
+          ]
+        },
+        "hysteriaSettings": {
+          "version": 2,
+          "udpIdleTimeout": 60,
+          "brutalUp": 50,
+          "brutalDown": 120
+        }
+      }
+    },
+    {
+      "tag": "RealitySteal2",
+      "port": 8443,
+      "listen": "0.0.0.0",
+      "protocol": "vless",
+      "settings": {
+        "flow": "xtls-rprx-vision",
+        "clients": [],
+        "decryption": "none"
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "dest": "www.microsoft.com:443",
+          "show": false,
+          "xver": 0,
+          "shortIds": [
+            "9cfcab58698d94e8"
+          ],
+          "privateKey": "",
+          "serverNames": [
+            "www.microsoft.com"
+          ]
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "DIRECT",
+      "protocol": "freedom",
+      "settings": {
+        "domainStrategy": "UseIPv4"
+      }
+    },
+    {
+      "tag": "BLOCK",
+      "protocol": "blackhole"
+    }
+  ],
+  "stats": {},
+  "api": {
+    "tag": "api",
+    "services": [
+      "HandlerService",
+      "StatsService"
+    ]
+  },
+  "policy": {
+    "levels": {
+      "0": {
+        "statsUserUplink": true,
+        "statsUserDownlink": true,
+        "statsUserOnline": true
+      }
+    },
+    "system": {
+      "statsInboundUplink": true,
+      "statsInboundDownlink": true,
+      "statsOutboundUplink": true,
+      "statsOutboundDownlink": true
+    }
+  }
+}
