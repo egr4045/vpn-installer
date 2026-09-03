@@ -20,7 +20,7 @@ scp -o BatchMode=yes -q -r "$ETC/peers" "root@$IP:/etc/safechill/"
   echo "TG_CHAT_ID=${TG_CHAT_ID:-$(cat "$ETC/tg_chat_id" 2>/dev/null || true)}"; echo "BOT_ENABLED=0"
   echo "AWG_PORT=${AWG_PORT:-39217}"; echo "AWG_NET4=${AWG_NET4:-10.8.0}"; echo "AWG_NET6=${AWG_NET6:-fd08:5afe:c411}"
   echo "TCP_PORT=${TCP_PORT:-8443}"; echo "FALLBACK_SNI=${FALLBACK_SNI:-gateway.icloud.com}"
-  echo "BLOCK_TORRENT=${BLOCK_TORRENT:-1}"; echo "EGRESS_PREFER=${EGRESS_PREFER:-ipv6}"; } > /tmp/exit2.env
+  echo "BLOCK_TORRENT=${BLOCK_TORRENT:-1}"; echo "EGRESS_PREFER=${EGRESS_PREFER:-ipv4}"; } > /tmp/exit2.env
 scp -o BatchMode=yes -q /tmp/exit2.env "root@$IP:/etc/safechill/vpn.env"; rm -f /tmp/exit2.env
 echo "> installing the stack on $IP (a few minutes)"
 "${SSH[@]}" "chmod 600 /etc/safechill/*.env /etc/safechill/users.json; cd /root/safechill && chmod +x install.sh bin/*.sh bin/*.py templates/*.sh && ./install.sh 2>&1 | tail -5"

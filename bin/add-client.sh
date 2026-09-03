@@ -81,7 +81,7 @@ awg_conf awg "$SERVER_IP:$AWG_PORT"
 # subscription: every xray link, base64, served by nginx behind the REALITY steal on :443
 for s in "${ORDER[@]}"; do cat "$D/$s.txt"; done | base64 -w0 > "$SUBDIR/$SUB"; chmod 644 "$SUBDIR/$SUB"
 echo "https://$DOMAIN/s/$SUB" > "$D/sub.txt"; qrencode -o "$D/sub.png" -s 6 < "$D/sub.txt"
-# AmneziaVPN native keys (one QR = xray + AWG): this exit (xray default / AWG default), RU entry, standby exit
+# AmneziaVPN native keys, one protocol each so the QR stays scannable: xray (main), AWG, RU entry, standby exit
 amnezia-key.py "$NAME" nl >/dev/null
 amnezia-key.py "$NAME" nl awg >/dev/null
 [ -n "${RU_HOST:-}" ] && amnezia-key.py "$NAME" ru >/dev/null

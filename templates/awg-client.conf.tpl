@@ -1,6 +1,6 @@
 [Interface]
 PrivateKey = ${PEER_PRIV}
-Address = ${AWG_NET4}.${PEER_N}/32, ${AWG_NET6}::${PEER_N}/128
+Address = ${AWG_NET4}.${PEER_N}/32
 DNS = 1.1.1.1, 8.8.8.8
 MTU = 1280
 Jc = ${AWG_JC}

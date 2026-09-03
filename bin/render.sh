@@ -11,7 +11,7 @@ ETC=/etc/safechill
 TPL="${REPO_TPL:-/usr/local/share/safechill/templates}"
 set -a; . "$ETC/vpn.env"; . "$ETC/secrets.env"; set +a
 export TORRENT_OUT=$([ "${BLOCK_TORRENT:-1}" = 1 ] && echo block || echo direct)
-export EGRESS_STRATEGY=$([ "${EGRESS_PREFER:-ipv6}" = ipv6 ] && echo UseIPv6v4 || echo UseIPv4v6)
+export EGRESS_STRATEGY=$([ "${EGRESS_PREFER:-ipv4}" = ipv6 ] && echo UseIPv6v4 || echo UseIPv4v6)
 export TCP_PORT=${TCP_PORT:-8443} FALLBACK_SNI=${FALLBACK_SNI:-gateway.icloud.com}
 export AWG_NET4=${AWG_NET4:-10.8.0} AWG_NET6=${AWG_NET6:-fd08:5afe:c411} AWG_PORT=${AWG_PORT:-39217}
 SSHOPT=(-o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new)
