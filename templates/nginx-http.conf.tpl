@@ -1,0 +1,7 @@
+server {
+    listen 80; listen [::]:80;
+    server_name ${DOMAIN};
+    root /var/www/html;
+    location /.well-known/acme-challenge/ { try_files $uri =404; }
+    location / { return 301 https://$host$request_uri; }
+}

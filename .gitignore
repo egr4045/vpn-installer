@@ -1,0 +1,14 @@
+# secrets & host state — never commit
+vpn.env
+*.env
+!vpn.env.example
+clients/
+*.png
+*.conf
+!templates/*
+*.pem
+*.key
+# local tooling
+.claude/
+__pycache__/
+*.bak

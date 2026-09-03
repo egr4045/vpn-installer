@@ -1,0 +1,7 @@
+[Unit]
+Description=SafeChill VPN health check
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vpn-health.sh

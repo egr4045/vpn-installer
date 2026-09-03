@@ -1,0 +1,27 @@
+# AmneziaWG 3.1 server — rendered by render.sh from /etc/safechill/*.env (do not edit by hand)
+[Interface]
+PrivateKey = ${AWG_PRIV}
+Address = ${AWG_NET4}.1/24, ${AWG_NET6}::1/64
+ListenPort = ${AWG_PORT}
+MTU = 1280
+Jc = ${AWG_JC}
+Jmin = ${AWG_JMIN}
+Jmax = ${AWG_JMAX}
+S1 = ${AWG_S1}
+S2 = ${AWG_S2}
+S3 = ${AWG_S3}
+S4 = ${AWG_S4}
+H1 = ${AWG_H1}
+H2 = ${AWG_H2}
+H3 = ${AWG_H3}
+H4 = ${AWG_H4}
+I1 = ${AWG_I1}
+I2 = ${AWG_I2}
+HeaderProtectionKey = ${AWG_HPK}
+ContentPaddingAddition = ${AWG_CPA}
+RekeyAfterTime = ${AWG_RAT}
+KeepaliveTimeout = ${AWG_KT}
+RandomTrailers = on
+DisableCookies = on
+PostUp = iptables -I FORWARD -i %i -j ACCEPT; iptables -I FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -s ${AWG_NET4}.0/24 -o ${WAN_IF} -j MASQUERADE; ip6tables -I FORWARD -i %i -j ACCEPT; ip6tables -I FORWARD -o %i -j ACCEPT; ip6tables -t nat -A POSTROUTING -s ${AWG_NET6}::/64 -o ${WAN_IF} -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -s ${AWG_NET4}.0/24 -o ${WAN_IF} -j MASQUERADE; ip6tables -D FORWARD -i %i -j ACCEPT; ip6tables -D FORWARD -o %i -j ACCEPT; ip6tables -t nat -D POSTROUTING -s ${AWG_NET6}::/64 -o ${WAN_IF} -j MASQUERADE
