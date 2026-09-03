@@ -63,6 +63,12 @@ if [ -n "${RU_HOST:-}" ]; then
   [ "$rcode" != 000 ] && [ -n "$rcode" ]
   report ru $? "RU-вход $RU_HOST :443 (HTTP $rcode)" "ssh -o BatchMode=yes -o ConnectTimeout=10 root@$RU_HOST systemctl restart xray"
 fi
+# 8b. standby exit (optional)
+if [ -n "${EXIT2_HOST:-}" ]; then
+  ecode=$(curl -sk -o /dev/null -w '%{http_code}' -m 8 --resolve "$EXIT2_DOMAIN:443:$EXIT2_HOST" "https://$EXIT2_DOMAIN/" || true)
+  [ "$ecode" = 200 ]
+  report exit2 $? "запасной выход $EXIT2_HOST :443 (HTTP $ecode)" "ssh -o BatchMode=yes -o ConnectTimeout=10 root@$EXIT2_HOST systemctl restart xray"
+fi
 # 9. popular sites reachable from the exit node — grouped, alert only when the set is stable for 2 runs
 tmpd=$(mktemp -d)
 for s in $SERVICES; do

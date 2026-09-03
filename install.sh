@@ -152,8 +152,14 @@ install -m644 "$REPO/templates/vpn-health.timer" /etc/systemd/system/vpn-health.
 systemctl daemon-reload; systemctl enable --now vpn-health.timer >/dev/null
 ok "vpn-health.timer enabled"
 
-# -- 8. Telegram admin bot (/users, /add, /qr, /status) ------------------------
-if [ -n "${TG_BOT_TOKEN:-}" ]; then
+# keep trying Let's Encrypt in the background while DNS propagates (transient unit, idempotent)
+if [[ "$CERT_DIR" == *selfsigned* ]] && ! systemctl is-active --quiet cert-retry.service; then
+  install -m755 "$REPO/templates/cert-retry.sh" /usr/local/bin/cert-retry.sh
+  systemd-run --unit=cert-retry --description="SafeChill: retry Let's Encrypt until DNS propagates" /usr/local/bin/cert-retry.sh >/dev/null 2>&1 || true
+fi
+
+# -- 8. Telegram admin bot (/users, /add, /qr, /status) — only on the control node ----
+if [ -n "${TG_BOT_TOKEN:-}" ] && [ "${BOT_ENABLED:-1}" = 1 ]; then
   install -m755 "$REPO/bin/safechill-bot.py" /usr/local/bin/safechill-bot.py
   install -m644 "$REPO/templates/safechill-bot.service" /etc/systemd/system/safechill-bot.service
   systemctl daemon-reload; systemctl enable safechill-bot.service >/dev/null 2>&1 || true; systemctl restart safechill-bot.service

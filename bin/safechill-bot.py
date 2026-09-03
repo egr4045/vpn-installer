@@ -150,39 +150,54 @@ def msg_profile(chat, name, what):
            f"<code>{esc(link.read_text().strip())}</code>")
     send_photo(chat, png, cap)
 
-def msg_amnezia(chat, name, node="nl"):
-    """One QR for AmneziaVPN: native vpn:// key with xray (XHTTP+REALITY) and AmneziaWG inside."""
-    d = CLIENTS / name; stem = "amnezia" if node == "nl" else "amnezia-ru"
-    key = d / f"{stem}.txt"
-    if not key.exists(): return send(chat, f"У {esc(name)} нет ключа {stem}, запусти /add {esc(name)} повторно")
-    where = "Амстердам, основной" if node == "nl" else "вход через Россию, для мобильного в дни белых списков"
+AMNEZIA_KEYS = {  # variant -> (file stem, where, what is inside)
+    "amnezia":    ("amnezia",     "основной сервер, Амстердам",            "обычный протокол включён, AmneziaWG внутри как запасной"),
+    "amneziaawg": ("amnezia-awg", "основной сервер, Амстердам",            "включён AmneziaWG: для домашнего Wi-Fi и ПК, когда нужна скорость"),
+    "amneziaru":  ("amnezia-ru",  "вход через Россию",                     "для мобильного интернета в дни белых списков; выход всё равно за рубежом"),
+    "amnezia2":   ("amnezia-x2",  "запасной выход",                        "если основной Амстердам вдруг недоступен"),
+}
+
+def msg_amnezia(chat, name, variant="amnezia"):
+    """One QR for AmneziaVPN: native vpn:// key with our protocols inside."""
+    stem, where, inside = AMNEZIA_KEYS[variant]; d = CLIENTS / name; key = d / f"{stem}.txt"
+    if not key.exists(): return send(chat, f"У {esc(name)} нет ключа «{variant}» (нет такой ноды?), либо запусти /add {esc(name)} повторно")
     cap = (f"🔐 <b>{BRAND} · {esc(name)} · AmneziaVPN</b>\n"
-           f"<b>Один QR на всё для AmneziaVPN</b> ({where}). Внутри сразу два протокола: обычный и AmneziaWG, "
-           f"переключаются в самом приложении.\n\n"
+           f"<b>Один QR</b> · {where}. {inside}.\n\n"
            f"1. {amnezia_line()}\n"
            f"2. В Amnezia: «+» → «Подключиться по ключу» → отсканировать QR (или вставить ключ из следующего сообщения)\n"
            f"3. Включить. Готово.")
     send_photo(chat, d / f"{stem}.png", cap)
     send(chat, f"Ключ текстом, если QR не читается (нажми, чтобы скопировать):\n<code>{esc(key.read_text().strip())}</code>")
 
+def cmd_newip(chat):
+    if not ENV.get("TW_API_TOKEN") or not ENV.get("TW_SERVER_ID"):
+        return send(chat, "Нет TW_API_TOKEN / TW_SERVER_ID в /etc/safechill/vpn.env — без ключа Timeweb IP менять нечем.")
+    send(chat, "⏳ Беру новый IPv4 у Timeweb, переписываю DNS, конфиги RU-входа и все ключи. 1–2 минуты…")
+    rc, out = sh(["/usr/local/bin/rotate-ip.sh"], timeout=600)
+    send(chat, ("✅ " if rc == 0 else "❌ ") + f"<pre>{esc(out[-2500:])}</pre>")
+
+def cmd_dropip(chat, args):
+    if not args: return send(chat, "Так: /dropip 1.2.3.4 — отпустить лишний IPv4 (Timeweb перезагрузит сервер, ~5 минут простоя)")
+    rc, out = sh(["/usr/local/bin/drop-ip.sh", args[0]], timeout=120)
+    send(chat, ("✅ " if rc == 0 else "❌ ") + f"<pre>{esc(out[-1500:])}</pre>")
+
 def cmd_qr(chat, args):
     if not args: return send(chat, "Так: /qr Имя — один QR на всё (Happ)\n/qr Имя amnezia — один QR на всё для AmneziaVPN\n/qr Имя amneziaru — то же через RU-вход\n/qr Имя awg|ru|tcp|nl6|ru6|all")
     name = find_user(args[0])
     if not name: return send(chat, f"Не знаю «{esc(args[0])}». Список: /users")
-    what = args[1].lower() if len(args) > 1 else "sub"
+    what = args[1].lower().replace("-", "") if len(args) > 1 else "sub"
     if what in ("sub", "happ"): return msg_sub(chat, name)
-    if what == "amnezia": return msg_amnezia(chat, name, "nl")
-    if what in ("amneziaru", "amnezia-ru"): return msg_amnezia(chat, name, "ru")
+    if what in AMNEZIA_KEYS: return msg_amnezia(chat, name, what)
     if what == "all":
         msg_sub(chat, name); time.sleep(1)
-        msg_amnezia(chat, name, "nl"); time.sleep(1)
-        if (CLIENTS / name / "amnezia-ru.txt").exists(): msg_amnezia(chat, name, "ru"); time.sleep(1)
+        for v in AMNEZIA_KEYS:
+            if (CLIENTS / name / f"{AMNEZIA_KEYS[v][0]}.txt").exists(): msg_amnezia(chat, name, v); time.sleep(1)
         for w in ("nl", "awg", "ru", "tcp", "nl6", "ru6"):
             f = CLIENTS / name / ("awg.conf" if w == "awg" else {"nl": "nl-xhttp", "ru": "ru-xhttp", "tcp": "nl-tcp", "nl6": "nl6-xhttp", "ru6": "ru6-xhttp"}[w] + ".txt")
             if f.exists(): msg_profile(chat, name, w); time.sleep(1)
         return
     if what in ("nl", "tcp", "ru", "nl6", "ru6", "awg"): return msg_profile(chat, name, what)
-    send(chat, "Варианты: (ничего) · amnezia · amneziaru · awg · ru · tcp · nl6 · ru6 · all")
+    send(chat, "Варианты: (ничего) · amnezia · amneziaawg · amneziaru · amnezia2 · awg · ru · tcp · nl6 · ru6 · all")
 
 def cmd_users(chat):
     us = users(); seen = awg_last_seen()
@@ -214,8 +229,10 @@ def cmd_status(chat):
     send(chat, f"<pre>{esc(out[-3800:])}</pre>")
 
 HELP = ("Команды:\n/users — кто заведён\n/add Имя — новый человек (+ QR на всё)\n/qr Имя — один QR на всё (Happ)\n"
-        "/qr Имя amnezia — один QR на всё для AmneziaVPN (xray + AmneziaWG)\n/qr Имя amneziaru — то же через RU-вход\n"
-        "/qr Имя awg|ru|tcp|nl6|ru6|all — отдельные профили\n/del Имя yes — удалить\n/status — состояние нод")
+        "/qr Имя amnezia — один QR для AmneziaVPN (xray + AmneziaWG внутри)\n/qr Имя amneziaawg — то же, но включён AmneziaWG\n"
+        "/qr Имя amneziaru — через RU-вход (белые списки) · /qr Имя amnezia2 — запасной выход\n"
+        "/qr Имя awg|ru|tcp|nl6|ru6|all — отдельные профили\n/del Имя yes — удалить\n/status — состояние нод\n"
+        "/newip — новый IPv4 основной ноды, если старый заблокировали · /dropip 1.2.3.4 — отпустить лишний IP")
 
 def handle(msg):
     chat = msg["chat"]["id"]; frm = (msg.get("from") or {}).get("id"); text = (msg.get("text") or "").strip()
@@ -229,6 +246,8 @@ def handle(msg):
         elif cmd == "/qr": cmd_qr(chat, args)
         elif cmd == "/del": cmd_del(chat, args)
         elif cmd == "/status": cmd_status(chat)
+        elif cmd == "/newip": cmd_newip(chat)
+        elif cmd == "/dropip": cmd_dropip(chat, args)
         elif cmd in ("/start", "/help"): send(chat, f"🔐 <b>{BRAND}</b>\n{HELP}")
     except Exception as e:  # noqa: BLE001
         log("error", repr(e)); send(chat, f"❌ {esc(str(e)[:500])}")
@@ -240,7 +259,8 @@ def main():
         cmd_qr(int(sys.argv[3]), [name] + sys.argv[4:5]); return
     try:
         api("setMyCommands", commands=[{"command": "users", "description": "кто заведён"}, {"command": "add", "description": "добавить человека: /add Имя"},
-                                       {"command": "qr", "description": "QR на всё: /qr Имя  (amnezia | awg | ru | all)"}, {"command": "status", "description": "состояние нод"},
+                                       {"command": "qr", "description": "QR на всё: /qr Имя  (amnezia | amneziaawg | amneziaru | amnezia2 | all)"},
+                                       {"command": "status", "description": "состояние нод"}, {"command": "newip", "description": "сменить IPv4 основной ноды"},
                                        {"command": "help", "description": "справка"}])
     except Exception: pass
     off_file = STATE / "bot.offset"; offset = int(off_file.read_text()) if off_file.exists() else 0
