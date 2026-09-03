@@ -19,4 +19,12 @@ server {
     add_header Strict-Transport-Security "max-age=31536000" always;
     root /var/www/html; index index.html;
     location / { try_files $uri $uri/ =404; }
+    # personal subscriptions: /s/<token> = base64 list of this person's xray servers
+    location /s/ {
+        default_type text/plain;
+        add_header profile-title "base64:U2FmZUNoaWxs";
+        add_header profile-update-interval "12";
+        add_header Cache-Control "no-store";
+        try_files $uri =404;
+    }
 }

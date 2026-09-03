@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# del-client.sh <name> — revoke a person everywhere (xray on both nodes + awg) and delete their files.
+# del-client.sh <name> — revoke a person everywhere (xray on both nodes, awg, subscription) and delete their files.
 set -euo pipefail
 ETC=/etc/safechill; NAME="${1:?usage: del-client.sh <name>}"
+SUB=$(jq -r --arg n "$NAME" '.[]|select(.name==$n)|.sub // empty' "$ETC/users.json")
+[ -n "$SUB" ] && rm -f "/var/www/html/s/$SUB"
 tmp=$(mktemp); jq --arg n "$NAME" 'map(select(.name!=$n))' "$ETC/users.json" > "$tmp" && install -m600 "$tmp" "$ETC/users.json" && rm -f "$tmp"
 rm -f "$ETC/peers/$NAME.env"; rm -rf "/root/clients/$NAME"
 render.sh
