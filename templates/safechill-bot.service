@@ -1,0 +1,11 @@
+[Unit]
+Description=SafeChill Telegram admin bot
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/safechill-bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -152,6 +152,15 @@ install -m644 "$REPO/templates/vpn-health.timer" /etc/systemd/system/vpn-health.
 systemctl daemon-reload; systemctl enable --now vpn-health.timer >/dev/null
 ok "vpn-health.timer enabled"
 
+# -- 8. Telegram admin bot (/users, /add, /qr, /status) ------------------------
+if [ -n "${TG_BOT_TOKEN:-}" ]; then
+  install -m755 "$REPO/bin/safechill-bot.py" /usr/local/bin/safechill-bot.py
+  install -m644 "$REPO/templates/safechill-bot.service" /etc/systemd/system/safechill-bot.service
+  systemctl daemon-reload; systemctl enable safechill-bot.service >/dev/null 2>&1 || true; systemctl restart safechill-bot.service
+  [ -n "${TG_ADMIN_IDS:-}" ] || echo "! TG_ADMIN_IDS is empty in $ETC/vpn.env — nobody can use the bot's commands yet"
+  ok "telegram bot running (admins: ${TG_ADMIN_IDS:-none})"
+fi
+
 say "Done."
 echo "  add a person:    add-client.sh <name>      (prints links, writes /root/clients/<name>/)"
 echo "  RU entry node:   setup-ru.sh <ru-ip> [sni]"
