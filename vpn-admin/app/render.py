@@ -24,8 +24,18 @@ HY2_TAG = "Hysteria2"
 CLIENT_TAGS = VLESS_TAGS + (HY2_TAG,)
 
 
-def _vless_client(u: dict) -> dict:
-    return {"id": u["vless_uuid"], "email": u["username"]}
+# REALITY inbounds run XTLS Vision. gen_sub_links() hands clients
+# flow=xtls-rprx-vision, so the server-side client entry MUST carry the same
+# flow or xray rejects the handshake silently (no log line, zero connections).
+# Note: "flow" belongs on each client — xray ignores it at settings level.
+REALITY_TAGS = ("Steal", "RealitySteal2")
+
+
+def _vless_client(u: dict, tag: str = "") -> dict:
+    c = {"id": u["vless_uuid"], "email": u["username"]}
+    if tag in REALITY_TAGS:
+        c["flow"] = "xtls-rprx-vision"
+    return c
 
 
 def _hy2_client(u: dict) -> dict:
@@ -33,7 +43,7 @@ def _hy2_client(u: dict) -> dict:
 
 
 def _client_for(tag: str, u: dict) -> dict:
-    return _hy2_client(u) if tag == HY2_TAG else _vless_client(u)
+    return _hy2_client(u) if tag == HY2_TAG else _vless_client(u, tag)
 
 
 def _overlay_settings(inbounds: list[dict], cfg) -> None:

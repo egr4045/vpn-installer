@@ -41,7 +41,10 @@ _DEFAULTS: dict = {
     "reality_public_key":  "",
     "reality_private_key": "",
     "reality_short_id":    "",
-    "reality_sni":         "www.microsoft.com",   # RealitySteal2 real-site steal target (public, generic)
+    # RealitySteal2 real-site steal target. Must be a host whose TLS handshake
+    # completes through REALITY: www.microsoft.com does NOT (dies at Certificate,
+    # ~9.6 KB chain via Akamai) and silently rejects every client.
+    "reality_sni":         "gateway.icloud.com",
     "reality_port":        8443,
 
     # protocol endpoints
@@ -100,6 +103,15 @@ _DEFAULTS: dict = {
     # enforcement / polling
     "poll_interval_sec": 120,
 
+    # Monthly rollover of per-user traffic counters. Day of month (1-31) on which
+    # every user's used_up/used_down is zeroed, mirroring the hosting provider's
+    # own billing period so our accounting lines up with theirs.
+    #   0  = follow the provider widget's reset date (provider.reset_field)
+    #   1-31 = fixed day; clamped to the last day in shorter months
+    # If 0 and the provider date is unavailable, the rollover is SKIPPED rather
+    # than guessed — resetting on the wrong day is worse than resetting late.
+    "traffic_reset_day": 0,
+
     # outbound link watchdog — TCP-connects to these external anycast IPs on a
     # tight cadence; all-fail => uplink packet-loss/blip (takes every protocol
     # down at once). IPs, not hostnames, so a DNS hiccup isn't misread as a link
@@ -131,7 +143,7 @@ _DEFAULTS: dict = {
 WEB_EDITABLE = {
     "brand", "domains", "sub_https_base", "sub_mirrors", "reality_sni",
     "hy2_up_mbps", "hy2_down_mbps", "admin_user", "admin_pass", "tg_bot_token",
-    "host_thresholds", "user_thresholds", "provider",
+    "host_thresholds", "user_thresholds", "provider", "traffic_reset_day",
 }
 
 # env var name -> (settings key, caster)

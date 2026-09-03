@@ -18,6 +18,14 @@ def gen_sub_links(uuid: str, trojan_pass: str, name: str, cfg=None) -> list[str]
     cfg = cfg or config.get_settings()
     ip = cfg.server_ip
     return [
+        # Reality on :443 via the "Steal" inbound — fronts our own nginx, so the
+        # traffic looks like plain HTTPS to our site. Preferred: RU DPI resets
+        # REALITY on non-443 ports, which is why the :8443 entry below never
+        # connected from Russia even when the server side was healthy.
+        f"vless://{uuid}@{ip}:443?encryption=none&security=reality"
+        f"&flow=xtls-rprx-vision&pbk={cfg.reality_public_key}&sid={cfg.reality_short_id}"
+        f"&sni={cfg.direct_domain}&type=tcp&fp=chrome#{quote('Reality443-' + name)}",
+
         # Reality / Vision — real-site steal on dedicated port (anti-DPI)
         f"vless://{uuid}@{ip}:{cfg.reality_port}?encryption=none&security=reality"
         f"&flow=xtls-rprx-vision&pbk={cfg.reality_public_key}&sid={cfg.reality_short_id}"
@@ -149,11 +157,20 @@ def gen_singbox_json(uuid: str, trojan_pass: str, name: str, cfg=None) -> str:
     cfg = cfg or config.get_settings()
     ip = cfg.server_ip
     n = name.replace('"', "").replace("'", "")
-    tags = [f"Reality-{n}", f"httpUpgrade-{n}", f"Hy2-{n}", f"Hy2-2-{n}", f"TUIC-{n}", f"TCP-{n}"]
+    tags = [f"Reality443-{n}", f"Reality-{n}", f"httpUpgrade-{n}", f"Hy2-{n}", f"Hy2-2-{n}",
+            f"TUIC-{n}", f"TCP-{n}"]
     cfg_doc = {
         "outbounds": [
             {"type": "urltest", "tag": "auto", "outbounds": tags,
              "url": "https://www.gstatic.com/generate_204", "interval": "10m0s", "tolerance": 50},
+            # Reality on :443 (Steal inbound, fronts our nginx). Listed first because
+            # RU DPI resets REALITY on non-443 ports — see the :8443 entry below.
+            {"type": "vless", "tag": f"Reality443-{n}", "server": ip, "server_port": 443,
+             "uuid": uuid, "flow": "xtls-rprx-vision",
+             "tls": {"enabled": True, "server_name": cfg.direct_domain,
+                     "reality": {"enabled": True, "public_key": cfg.reality_public_key,
+                                 "short_id": cfg.reality_short_id},
+                     "utls": {"enabled": True, "fingerprint": "chrome"}}},
             {"type": "vless", "tag": f"Reality-{n}", "server": ip, "server_port": cfg.reality_port,
              "uuid": uuid, "flow": "xtls-rprx-vision",
              "tls": {"enabled": True, "server_name": cfg.reality_sni,

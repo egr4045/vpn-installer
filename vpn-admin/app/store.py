@@ -147,6 +147,13 @@ def reset_traffic(uid: int) -> None:
         c.execute("UPDATE users SET used_up=0, used_down=0 WHERE id=?", (uid,))
 
 
+def reset_all_traffic() -> int:
+    """Zero every user's counters (monthly billing-period rollover). Returns rows hit."""
+    with _conn() as c:
+        cur = c.execute("UPDATE users SET used_up=0, used_down=0")
+        return cur.rowcount
+
+
 # ── traffic accounting ──────────────────────────────────────────────────────--
 def add_traffic(username: str, up: int = 0, down: int = 0) -> None:
     if not (up or down):
