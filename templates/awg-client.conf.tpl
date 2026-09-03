@@ -26,5 +26,5 @@ RandomTrailers = on
 PublicKey = ${AWG_PUB}
 PresharedKey = ${PEER_PSK}
 AllowedIPs = 0.0.0.0/0, ::/0
-Endpoint = ${SERVER_IP}:${AWG_PORT}
+Endpoint = ${ENDPOINT}
 PersistentKeepalive = 25

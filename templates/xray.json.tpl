@@ -33,7 +33,7 @@
     }
   ],
   "outbounds": [
-    { "tag": "direct", "protocol": "freedom", "settings": { "domainStrategy": "UseIPv4v6" } },
+    { "tag": "direct", "protocol": "freedom", "settings": { "domainStrategy": "${EGRESS_STRATEGY}" } },
     { "tag": "block",  "protocol": "blackhole" }
   ],
   "routing": {

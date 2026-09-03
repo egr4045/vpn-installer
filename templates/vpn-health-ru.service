@@ -1,0 +1,7 @@
+[Unit]
+Description=SafeChill RU entry node health check
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vpn-health-ru.sh

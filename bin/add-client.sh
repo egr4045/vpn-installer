@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
-# add-client.sh <name> — create a person: xray UUID (all inbounds, both nodes) + AmneziaWG peer.
-# Writes /root/clients/<name>/ (links, awg.conf, QR pngs) and prints the links.
+# add-client.sh <name> — create (or refresh) a person: xray UUID on every inbound of both nodes +
+# an AmneziaWG peer. Writes /root/clients/<name>/ and prints the links.
+#
+#   nl-xhttp   main: XHTTP+REALITY to the exit node over IPv4        nl6-xhttp  same over IPv6
+#   nl-tcp     fallback: TCP+REALITY+vision, SNI icloud               nl6-tcp
+#   ru-xhttp   entry node in Russia (mobile "white lists")            ru6-xhttp
+#   ru-tcp                                                             ru6-tcp
+#   awg.conf   AmneziaWG 3.1 over IPv4                                awg6.conf  over IPv6
 set -euo pipefail
 ETC=/etc/safechill; OUT=/root/clients; TPL=/usr/local/share/safechill/templates
 NAME="${1:-}"; [[ "$NAME" =~ ^[A-Za-z0-9_-]{1,32}$ ]] || { echo "usage: add-client.sh <name>   (letters, digits, - _)"; exit 1; }
@@ -28,7 +34,7 @@ render.sh
 systemctl restart xray
 awg syncconf awg0 <(awg-quick strip awg0) 2>/dev/null || systemctl restart awg-quick@awg0
 
-mkdir -p "$OUT/$NAME"; chmod 700 "$OUT"
+D="$OUT/$NAME"; mkdir -p "$D"; chmod 700 "$OUT"; rm -f "$D"/*.txt "$D"/*.png "$D"/*.conf
 EXTRA=$(python3 - <<'PY'
 import urllib.parse, json
 x = {"xmux": {"maxConcurrency": "16-32", "maxConnections": 0, "cMaxReuseTimes": "64-128",
@@ -36,23 +42,32 @@ x = {"xmux": {"maxConcurrency": "16-32", "maxConnections": 0, "cMaxReuseTimes": 
 print(urllib.parse.quote(json.dumps(x, separators=(",", ":")), safe=""))
 PY
 )
-XHTTP="vless://$UUID@$SERVER_IP:443?encryption=none&security=reality&type=xhttp&path=%2F$XHTTP_PATH&mode=auto&sni=$DOMAIN&fp=firefox&pbk=$REALITY_PUB&sid=$SHORT_ID&extra=$EXTRA#$BRAND-NL-XHTTP-$NAME"
-TCP="vless://$UUID@$SERVER_IP:$TCP_PORT?encryption=none&security=reality&type=tcp&flow=xtls-rprx-vision&sni=$FALLBACK_SNI&fp=chrome&pbk=$REALITY_PUB&sid=$SHORT_ID#$BRAND-NL-TCP-$NAME"
-echo "$XHTTP" > "$OUT/$NAME/nl-xhttp.txt"; echo "$TCP" > "$OUT/$NAME/nl-tcp.txt"
-qrencode -o "$OUT/$NAME/nl-xhttp.png" -s 6 "$XHTTP"; qrencode -o "$OUT/$NAME/nl-tcp.png" -s 6 "$TCP"
-envsubst < "$TPL/awg-client.conf.tpl" > "$OUT/$NAME/awg.conf"
-qrencode -o "$OUT/$NAME/awg.png" -s 5 < "$OUT/$NAME/awg.conf"
+# link <file-stem> <host> <sni> <fp> <label>
+xhttp_link() { echo "vless://$UUID@$2:443?encryption=none&security=reality&type=xhttp&path=%2F$XHTTP_PATH&mode=auto&sni=$3&fp=$4&pbk=$REALITY_PUB&sid=$SHORT_ID&extra=$EXTRA#$BRAND-$5-XHTTP-$NAME" > "$D/$1.txt"; qrencode -o "$D/$1.png" -s 6 < "$D/$1.txt"; }
+tcp_link()   { echo "vless://$UUID@$2:$TCP_PORT?encryption=none&security=reality&type=tcp&flow=xtls-rprx-vision&sni=$3&fp=$4&pbk=$REALITY_PUB&sid=$SHORT_ID#$BRAND-$5-TCP-$NAME" > "$D/$1.txt"; qrencode -o "$D/$1.png" -s 6 < "$D/$1.txt"; }
+awg_conf()   { ENDPOINT="$2" envsubst < "$TPL/awg-client.conf.tpl" > "$D/$1.conf"; qrencode -o "$D/$1.png" -s 5 < "$D/$1.conf"; }
+
+xhttp_link nl-xhttp "$SERVER_IP" "$DOMAIN" firefox NL
+tcp_link   nl-tcp   "$SERVER_IP" "$FALLBACK_SNI" chrome NL
+awg_conf   awg      "$SERVER_IP:$AWG_PORT"
+if [ -n "${SERVER_IP6:-}" ]; then
+  xhttp_link nl6-xhttp "[$SERVER_IP6]" "$DOMAIN" firefox NL6
+  tcp_link   nl6-tcp   "[$SERVER_IP6]" "$FALLBACK_SNI" chrome NL6
+  awg_conf   awg6      "[$SERVER_IP6]:$AWG_PORT"
+fi
 if [ -n "${RU_HOST:-}" ]; then
   RU_SNI=${RU_SNI:-yandex.ru}
-  RUX="vless://$UUID@$RU_HOST:443?encryption=none&security=reality&type=xhttp&path=%2F$XHTTP_PATH&mode=auto&sni=$RU_SNI&fp=chrome&pbk=$REALITY_PUB&sid=$SHORT_ID&extra=$EXTRA#$BRAND-RU-XHTTP-$NAME"
-  RUT="vless://$UUID@$RU_HOST:$TCP_PORT?encryption=none&security=reality&type=tcp&flow=xtls-rprx-vision&sni=$RU_SNI&fp=chrome&pbk=$REALITY_PUB&sid=$SHORT_ID#$BRAND-RU-TCP-$NAME"
-  echo "$RUX" > "$OUT/$NAME/ru-xhttp.txt"; echo "$RUT" > "$OUT/$NAME/ru-tcp.txt"
-  qrencode -o "$OUT/$NAME/ru-xhttp.png" -s 6 "$RUX"; qrencode -o "$OUT/$NAME/ru-tcp.png" -s 6 "$RUT"
+  xhttp_link ru-xhttp "$RU_HOST" "$RU_SNI" chrome RU
+  tcp_link   ru-tcp   "$RU_HOST" "$RU_SNI" chrome RU
+  if [ -n "${RU_HOST6:-}" ]; then
+    xhttp_link ru6-xhttp "[$RU_HOST6]" "$RU_SNI" chrome RU6
+    tcp_link   ru6-tcp   "[$RU_HOST6]" "$RU_SNI" chrome RU6
+  fi
 fi
-chmod 600 "$OUT/$NAME"/*
+chmod 600 "$D"/*
 echo; echo "== $NAME =="
-echo "NL XHTTP (main):     $XHTTP"; echo
-echo "NL TCP (fallback):   $TCP"; echo
-[ -n "${RU_HOST:-}" ] && { echo "RU XHTTP (mobile whitelists): $RUX"; echo; echo "RU TCP:              $RUT"; echo; }
-echo "AmneziaWG 3.1 conf:  $OUT/$NAME/awg.conf"
-echo "QR codes:            $OUT/$NAME/*.png"
+echo "NL XHTTP (main):   $(cat "$D/nl-xhttp.txt")"; echo
+echo "NL TCP (fallback): $(cat "$D/nl-tcp.txt")"; echo
+[ -f "$D/ru-xhttp.txt" ] && { echo "RU XHTTP (mobile whitelists): $(cat "$D/ru-xhttp.txt")"; echo; }
+echo "AmneziaWG 3.1:     $D/awg.conf $([ -f "$D/awg6.conf" ] && echo "+ awg6.conf (IPv6)")"
+echo "all files:         $(ls "$D" | tr '\n' ' ')"

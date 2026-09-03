@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# vpn-health.sh — runs every minute from vpn-health.timer. Probes every protocol path,
-# restarts what died, and tells Telegram once per state change (no spam).
+# vpn-health.sh — runs every minute from vpn-health.timer on the exit node. Probes every protocol
+# path, restarts what died, checks that popular sites are reachable from here, and tells Telegram
+# once per state change (no spam; site outages are grouped into one message).
 set -u
 ETC=/etc/safechill; STATE=/var/lib/safechill/health.state; LOG=/var/log/vpn-health.log
 set -a; . "$ETC/vpn.env" 2>/dev/null; set +a
 TCP_PORT=${TCP_PORT:-8443}; FALLBACK_SNI=${FALLBACK_SNI:-gateway.icloud.com}; BRAND=${BRAND:-SafeChill}
+SERVICES=${SERVICES:-"www.youtube.com www.google.com www.instagram.com web.telegram.org chatgpt.com x.com www.facebook.com discord.com www.tiktok.com web.whatsapp.com github.com www.netflix.com"}
 mkdir -p /var/lib/safechill; touch "$STATE"
 
-tg() { # tg <text> — first person who writes to the bot becomes the alert chat
+tg() { # tg <text> — TG_CHAT_ID from vpn.env, else /etc/safechill/tg_chat_id, else the first person who wrote to the bot
   [ -n "${TG_BOT_TOKEN:-}" ] || return 0
-  local id; id=$(cat "$ETC/tg_chat_id" 2>/dev/null || true)
+  local id="${TG_CHAT_ID:-}"; [ -n "$id" ] || id=$(cat "$ETC/tg_chat_id" 2>/dev/null || true)
   if [ -z "$id" ]; then
     id=$(curl -s -m 8 "https://api.telegram.org/bot$TG_BOT_TOKEN/getUpdates" | jq -r '[.result[]|.message.chat.id|select(.!=null)][0] // empty')
     [ -n "$id" ] || return 0
@@ -43,8 +45,9 @@ awg show awg0 >/dev/null 2>&1 && ip link show awg0 2>/dev/null | grep -q ',UP'
 report awg $? "AmneziaWG awg0" "systemctl restart awg-quick@awg0"
 # 4. nginx
 systemctl is-active --quiet nginx; report nginx $? "nginx" "systemctl restart nginx"
-# 5. egress
-curl -4 -s -o /dev/null -m 6 https://www.cloudflare.com/cdn-cgi/trace; report egress $? "внешний интернет с сервера"
+# 5. egress, both families
+curl -4 -s -o /dev/null -m 6 https://www.cloudflare.com/cdn-cgi/trace; report egress4 $? "внешний интернет IPv4 с сервера"
+if [ -n "${SERVER_IP6:-}" ]; then curl -6 -s -o /dev/null -m 6 https://www.cloudflare.com/cdn-cgi/trace; report egress6 $? "внешний интернет IPv6 с сервера"; fi
 # 6. certificate (Let's Encrypt, or the temporary self-signed one install.sh falls back to)
 CERT_DIR=${CERT_DIR:-/etc/letsencrypt/live/$DOMAIN}
 end=$(openssl x509 -enddate -noout -in "$CERT_DIR/fullchain.pem" 2>/dev/null | cut -d= -f2)
@@ -60,5 +63,18 @@ if [ -n "${RU_HOST:-}" ]; then
   [ "$rcode" != 000 ] && [ -n "$rcode" ]
   report ru $? "RU-вход $RU_HOST :443 (HTTP $rcode)" "ssh -o BatchMode=yes -o ConnectTimeout=10 root@$RU_HOST systemctl restart xray"
 fi
-echo "$(date +%FT%T) checked, failing=$(wc -l < "$STATE")" >> "$LOG"
+# 9. popular sites reachable from the exit node — grouped, alert only when the set is stable for 2 runs
+tmpd=$(mktemp -d)
+for s in $SERVICES; do
+  ( c=$(curl -s -o /dev/null -m 8 -w '%{http_code}' "https://$s/" || true); [ "$c" = 000 ] && echo "$s" > "$tmpd/$s" ) &
+done; wait
+now=$(ls "$tmpd" 2>/dev/null | sort | tr '\n' ' ' | sed 's/ $//'); rm -rf "$tmpd"
+last=$(cat /var/lib/safechill/services.last 2>/dev/null || true); alerted=$(cat /var/lib/safechill/services.alerted 2>/dev/null || true)
+echo "$now" > /var/lib/safechill/services.last
+if [ "$now" = "$last" ] && [ "$now" != "$alerted" ]; then
+  if [ -n "$now" ]; then tg "🟠 $BRAND: с NL-ноды недоступны: $now"; echo "$(date +%FT%T) SITES DOWN $now" >> "$LOG"
+  else tg "🟢 $BRAND: все сервисы снова доступны с NL-ноды"; echo "$(date +%FT%T) SITES OK" >> "$LOG"; fi
+  echo "$now" > /var/lib/safechill/services.alerted
+fi
+echo "$(date +%FT%T) checked, failing=$(wc -l < "$STATE")${now:+, sites down: $now}" >> "$LOG"
 tail -n 2000 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"

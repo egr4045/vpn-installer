@@ -26,10 +26,12 @@ AWG_PORT=${AWG_PORT:-39217}; TCP_PORT=${TCP_PORT:-8443}; FALLBACK_SNI=${FALLBACK
 AWG_NET4=${AWG_NET4:-10.8.0}; AWG_NET6=${AWG_NET6:-fd08:5afe:c411}; BLOCK_TORRENT=${BLOCK_TORRENT:-1}
 WAN_IF="$(ip route show default | awk '{print $5}' | head -1)"
 SERVER_IP="${SERVER_IP:-$(ip -4 addr show "$WAN_IF" | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)}"
+SERVER_IP6="${SERVER_IP6:-$(ip -6 addr show scope global dev "$WAN_IF" 2>/dev/null | awk '/inet6/{print $2}' | cut -d/ -f1 | grep -v '^fd' | head -1)}"
 grep -q '^WAN_IF=' "$ETC/vpn.env" || echo "WAN_IF=$WAN_IF" >> "$ETC/vpn.env"
 grep -q '^SERVER_IP=' "$ETC/vpn.env" || echo "SERVER_IP=$SERVER_IP" >> "$ETC/vpn.env"
-export WAN_IF SERVER_IP AWG_PORT TCP_PORT FALLBACK_SNI AWG_NET4 AWG_NET6 BLOCK_TORRENT
-ok "config: domain=$DOMAIN ip=$SERVER_IP wan=$WAN_IF awg=udp/$AWG_PORT"
+grep -q '^SERVER_IP6=' "$ETC/vpn.env" || echo "SERVER_IP6=$SERVER_IP6" >> "$ETC/vpn.env"
+export WAN_IF SERVER_IP SERVER_IP6 AWG_PORT TCP_PORT FALLBACK_SNI AWG_NET4 AWG_NET6 BLOCK_TORRENT
+ok "config: domain=$DOMAIN ip=$SERVER_IP${SERVER_IP6:+ / $SERVER_IP6} wan=$WAN_IF awg=udp/$AWG_PORT"
 
 # -- 1. packages ---------------------------------------------------------------
 say "Packages"
