@@ -122,7 +122,7 @@ def msg_sub(chat, name):
            f"1. Установи <b>Happ</b>: <a href=\"{HAPP_IOS}\">iPhone</a> · <a href=\"{HAPP_ANDROID}\">Android</a> · <a href=\"{HAPP_SITE}\">Windows и Mac</a>\n"
            f"2. В Happ нажми «+» → «Сканировать QR» (или вставь ссылку ниже)\n"
            f"3. Включи. Готово.\n\n<code>{esc(link.read_text().strip())}</code>\n\n"
-           f"Если пользуешься AmneziaVPN: /qr {esc(name)} amnezia")
+           f"Пользуешься AmneziaVPN? Тогда: /qr {esc(name)} amnezia — тоже один QR на всё")
     send_photo(chat, d / "sub.png", cap)
 
 def msg_profile(chat, name, what):
@@ -150,22 +150,39 @@ def msg_profile(chat, name, what):
            f"<code>{esc(link.read_text().strip())}</code>")
     send_photo(chat, png, cap)
 
+def msg_amnezia(chat, name, node="nl"):
+    """One QR for AmneziaVPN: native vpn:// key with xray (XHTTP+REALITY) and AmneziaWG inside."""
+    d = CLIENTS / name; stem = "amnezia" if node == "nl" else "amnezia-ru"
+    key = d / f"{stem}.txt"
+    if not key.exists(): return send(chat, f"У {esc(name)} нет ключа {stem}, запусти /add {esc(name)} повторно")
+    where = "Амстердам, основной" if node == "nl" else "вход через Россию, для мобильного в дни белых списков"
+    cap = (f"🔐 <b>{BRAND} · {esc(name)} · AmneziaVPN</b>\n"
+           f"<b>Один QR на всё для AmneziaVPN</b> ({where}). Внутри сразу два протокола: обычный и AmneziaWG, "
+           f"переключаются в самом приложении.\n\n"
+           f"1. {amnezia_line()}\n"
+           f"2. В Amnezia: «+» → «Подключиться по ключу» → отсканировать QR (или вставить ключ из следующего сообщения)\n"
+           f"3. Включить. Готово.")
+    send_photo(chat, d / f"{stem}.png", cap)
+    send(chat, f"Ключ текстом, если QR не читается (нажми, чтобы скопировать):\n<code>{esc(key.read_text().strip())}</code>")
+
 def cmd_qr(chat, args):
-    if not args: return send(chat, "Так: /qr Имя — один QR на всё (Happ)\n/qr Имя amnezia — набор для AmneziaVPN\n/qr Имя awg|ru|tcp|nl6|ru6|all")
+    if not args: return send(chat, "Так: /qr Имя — один QR на всё (Happ)\n/qr Имя amnezia — один QR на всё для AmneziaVPN\n/qr Имя amneziaru — то же через RU-вход\n/qr Имя awg|ru|tcp|nl6|ru6|all")
     name = find_user(args[0])
     if not name: return send(chat, f"Не знаю «{esc(args[0])}». Список: /users")
     what = args[1].lower() if len(args) > 1 else "sub"
     if what in ("sub", "happ"): return msg_sub(chat, name)
-    if what == "amnezia":
-        msg_profile(chat, name, "nl"); msg_profile(chat, name, "awg"); return
+    if what == "amnezia": return msg_amnezia(chat, name, "nl")
+    if what in ("amneziaru", "amnezia-ru"): return msg_amnezia(chat, name, "ru")
     if what == "all":
-        msg_sub(chat, name)
+        msg_sub(chat, name); time.sleep(1)
+        msg_amnezia(chat, name, "nl"); time.sleep(1)
+        if (CLIENTS / name / "amnezia-ru.txt").exists(): msg_amnezia(chat, name, "ru"); time.sleep(1)
         for w in ("nl", "awg", "ru", "tcp", "nl6", "ru6"):
             f = CLIENTS / name / ("awg.conf" if w == "awg" else {"nl": "nl-xhttp", "ru": "ru-xhttp", "tcp": "nl-tcp", "nl6": "nl6-xhttp", "ru6": "ru6-xhttp"}[w] + ".txt")
             if f.exists(): msg_profile(chat, name, w); time.sleep(1)
         return
     if what in ("nl", "tcp", "ru", "nl6", "ru6", "awg"): return msg_profile(chat, name, what)
-    send(chat, "Варианты: (ничего) · amnezia · awg · ru · tcp · nl6 · ru6 · all")
+    send(chat, "Варианты: (ничего) · amnezia · amneziaru · awg · ru · tcp · nl6 · ru6 · all")
 
 def cmd_users(chat):
     us = users(); seen = awg_last_seen()
@@ -197,7 +214,8 @@ def cmd_status(chat):
     send(chat, f"<pre>{esc(out[-3800:])}</pre>")
 
 HELP = ("Команды:\n/users — кто заведён\n/add Имя — новый человек (+ QR на всё)\n/qr Имя — один QR на всё (Happ)\n"
-        "/qr Имя amnezia — набор для AmneziaVPN\n/qr Имя awg|ru|tcp|nl6|ru6|all — отдельные профили\n/del Имя yes — удалить\n/status — состояние нод")
+        "/qr Имя amnezia — один QR на всё для AmneziaVPN (xray + AmneziaWG)\n/qr Имя amneziaru — то же через RU-вход\n"
+        "/qr Имя awg|ru|tcp|nl6|ru6|all — отдельные профили\n/del Имя yes — удалить\n/status — состояние нод")
 
 def handle(msg):
     chat = msg["chat"]["id"]; frm = (msg.get("from") or {}).get("id"); text = (msg.get("text") or "").strip()

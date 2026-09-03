@@ -78,9 +78,13 @@ awg_conf awg "$SERVER_IP:$AWG_PORT"
 # subscription: every xray link, base64, served by nginx behind the REALITY steal on :443
 for s in "${ORDER[@]}"; do cat "$D/$s.txt"; done | base64 -w0 > "$SUBDIR/$SUB"; chmod 644 "$SUBDIR/$SUB"
 echo "https://$DOMAIN/s/$SUB" > "$D/sub.txt"; qrencode -o "$D/sub.png" -s 6 < "$D/sub.txt"
+# AmneziaVPN native keys: one QR = xray + AmneziaWG for the exit node; a second one for the RU entry
+amnezia-key.py "$NAME" nl >/dev/null
+[ -n "${RU_HOST:-}" ] && amnezia-key.py "$NAME" ru >/dev/null
 chmod 600 "$D"/*
 echo; echo "== $NAME =="
 echo "ONE-QR subscription (Happ etc.): $(cat "$D/sub.txt")"; echo
+echo "AmneziaVPN one-QR key (xray+AWG): $D/amnezia.txt ($(wc -c < "$D/amnezia.txt") chars)"; echo
 echo "NL XHTTP (main, AmneziaVPN):     $(cat "$D/nl-xhttp.txt")"; echo
 [ -f "$D/ru-xhttp.txt" ] && { echo "RU XHTTP (mobile whitelists):   $(cat "$D/ru-xhttp.txt")"; echo; }
 echo "AmneziaWG 3.1:                   $D/awg.conf $([ -f "$D/awg6.conf" ] && echo "+ awg6.conf (IPv6)")"

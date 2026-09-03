@@ -136,7 +136,7 @@ case "$CERT_DIR" in *selfsigned*) ok "nginx up on 127.0.0.1:8444 with a TEMPORAR
 
 # -- 6. install scripts + templates, render, start -----------------------------
 say "Rendering xray + AmneziaWG"
-install -m755 "$REPO/bin/"*.sh /usr/local/bin/
+install -m755 "$REPO/bin/"*.sh "$REPO/bin/"*.py /usr/local/bin/
 rm -rf "$SHARE/templates"; cp -r "$REPO/templates" "$SHARE/templates"
 render.sh
 systemctl enable xray >/dev/null 2>&1 || true; systemctl restart xray

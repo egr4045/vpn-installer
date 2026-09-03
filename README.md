@@ -87,7 +87,7 @@ update-xray.sh           # обновить xray на обеих нодах
 | `/users` | список людей и когда каждый последний раз поднимал AmneziaWG |
 | `/add Имя` | `add-client.sh` на обеих нодах и сразу основной QR |
 | `/qr Имя` | **один QR на всё**: личная подписка `https://домен/s/<token>` со всеми xray-серверами, для Happ и любого Xray-клиента с подписками; приложение само выбирает рабочий сервер |
-| `/qr Имя amnezia` | набор для AmneziaVPN: основной сервер + AmneziaWG, с объяснением куда что |
+| `/qr Имя amnezia` | **один QR для AmneziaVPN**: нативный ключ `vpn://` (формат самого клиента, см. `bin/amnezia-key.py`) с xray XHTTP+REALITY и AmneziaWG внутри; `amneziaru` — то же через RU-вход |
 | `/qr Имя awg` \| `ru` \| `tcp` \| `nl6` \| `ru6` \| `all` | отдельные профили; для AWG приходит файл awg.conf и QR |
 | `/del Имя yes` | удалить человека везде |
 | `/status` | вывод `vpn-status.sh` |
