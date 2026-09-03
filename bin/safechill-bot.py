@@ -2,9 +2,9 @@
 """safechill-bot — Telegram admin bot for the exit node (stdlib only, long polling).
 
 UX: /users shows every person as a button. Tapping a person sends a ready-to-forward AmneziaVPN card:
-one photo (small QR) with download links + 3 steps, and the key as a .vpn file with the text hidden
-under a spoiler. Buttons under the card give the other variants (AmneziaWG, RU entry, standby exit,
-Happ subscription) and deletion. Admins only (TG_ADMIN_IDS in /etc/safechill/vpn.env).
+one photo (QR) with download links + 3 steps, then the key as a .vpn file whose caption is the key
+itself in monospace (tap = copy). Buttons under the card: AWG (speed), RU (white lists), standby exit,
+HAPP (auto-select), delete. Admins only (TG_ADMIN_IDS in /etc/safechill/vpn.env).
 
 Commands: /users  /add <name>  /status  /newip  /dropip <ip>  /help   (also /qr <name> [variant])
 CLI: safechill-bot.py --card <name> <chat_id> [amnezia|awg|ru|x2|happ]
@@ -64,9 +64,10 @@ def send_photo(chat, path, caption, kb=None):
     if kb: f["reply_markup"] = json.dumps({"inline_keyboard": kb})
     return api_multipart("sendPhoto", f, {"photo": (pathlib.Path(path).name, pathlib.Path(path).read_bytes(), "image/png")})
 
-def send_doc(chat, blob, fname, caption):
-    return api_multipart("sendDocument", {"chat_id": str(chat), "caption": caption[:1024], "parse_mode": "HTML"},
-                         {"document": (fname, blob, "application/octet-stream")})
+def send_doc(chat, blob, fname, caption, kb=None):
+    f = {"chat_id": str(chat), "caption": caption[:1024], "parse_mode": "HTML"}
+    if kb: f["reply_markup"] = json.dumps({"inline_keyboard": kb})
+    return api_multipart("sendDocument", f, {"document": (fname, blob, "application/octet-stream")})
 
 # ── data ──────────────────────────────────────────────────────────────────────
 def users(): return json.loads((ETC / "users.json").read_text())
@@ -88,11 +89,14 @@ def awg_last_seen():
     except Exception: pass
     return out
 
-def ago(sec):
-    if sec is None: return ""
-    if sec < 180: return " 🟢"
-    if sec < 86400: return f" · AWG {sec // 3600}ч" if sec >= 3600 else f" · AWG {sec // 60}м"
-    return f" · AWG {sec // 86400}д"
+def xray_recent_users(minutes=5):
+    """name -> connections accepted in the last N minutes (from xray's access log in journald)."""
+    out = {}
+    try:
+        txt = subprocess.run(["journalctl", "-u", "xray", "--since", f"-{minutes}min", "--no-pager", "-o", "cat"], capture_output=True, text=True, timeout=15).stdout
+        for m in re.finditer(r"accepted .* email: (\S+)", txt): out[m.group(1)] = out.get(m.group(1), 0) + 1
+    except Exception: pass
+    return out
 
 def amnezia_latest():
     cache = STATE / "amnezia.latest"
@@ -110,22 +114,27 @@ def sh(cmd, timeout=180):
 
 # ── cards ─────────────────────────────────────────────────────────────────────
 VARIANTS = {  # variant -> (file stem, short title, one-line hint)
-    "amnezia": ("amnezia",     "основной",              "Амстердам. Ставь этот."),
-    "awg":     ("amnezia-awg", "AmneziaWG",             "Тот же сервер, протокол AmneziaWG: быстрее дома по Wi-Fi и на ПК, на мобильном может не работать. Не обязателен."),
-    "ru":      ("amnezia-ru",  "через Россию",          "Для мобильного интернета в дни, когда не открывается ничего иностранного. Выход всё равно Амстердам."),
-    "x2":      ("amnezia-x2",  "запасной выход",        "Если основной Амстердам вдруг недоступен."),
+    "amnezia": ("amnezia",     "основной",                        "Амстердам. Ставь этот."),
+    "awg":     ("amnezia-awg", "AWG, максимальная скорость",       "Тот же сервер по протоколу AmneziaWG: быстрее дома по Wi-Fi и на ПК. На мобильном интернете может не работать, тогда вернись к основному."),
+    "ru":      ("amnezia-ru",  "RU, белые списки",                 "Для мобильного интернета в дни, когда не открывается ничего иностранного. Выход всё равно Амстердам."),
+    "x2":      ("amnezia-x2",  "запасной выход",                   "Если основной Амстердам вдруг недоступен."),
 }
+BTN = {"amnezia": "🟢 Основной", "awg": "⚡ AWG (макс. скорость)", "ru": "🇷🇺 RU (белые списки)", "x2": "🛟 Запасной (если основной упал)"}
 
 def card_buttons(name, current):
-    row1 = []
-    for v, label in (("amnezia", "🟢 Основной"), ("awg", "⚡ AmneziaWG"), ("ru", "🇷🇺 Россия"), ("x2", "🛟 Запасной")):
+    rows, row = [], []
+    for v in ("amnezia", "awg", "ru", "x2"):
         if v != current and (CLIENTS / name / f"{VARIANTS[v][0]}.txt").exists():
-            row1.append({"text": label, "callback_data": f"k:{name}:{v}"})
-    row2 = [{"text": "🍏 Happ (авто-выбор)", "callback_data": f"k:{name}:happ"}, {"text": "🗑 Удалить", "callback_data": f"d:{name}"}]
-    return [row1, row2] if row1 else [row2]
+            row.append({"text": BTN[v], "callback_data": f"k:{name}:{v}"})
+            if len(row) == 2: rows.append(row); row = []
+    if row: rows.append(row)
+    last = [{"text": "🗑 Удалить", "callback_data": f"d:{name}"}]
+    if current != "happ": last.insert(0, {"text": "🍏 HAPP (авто-выбор сервера)", "callback_data": f"k:{name}:happ"})
+    rows.append(last)
+    return rows
 
 def card(chat, name, variant="amnezia"):
-    """Photo (QR) + .vpn file with the key under a spoiler. Ready to forward as-is."""
+    """Photo (QR + instructions), then the key as a .vpn file whose caption is the key in monospace."""
     if variant == "happ": return card_happ(chat, name)
     stem, title, hint = VARIANTS[variant]; d = CLIENTS / name; key_f = d / f"{stem}.txt"
     if not key_f.exists(): return send(chat, f"У {esc(name)} нет варианта «{title}» (такой ноды нет)")
@@ -133,39 +142,73 @@ def card(chat, name, variant="amnezia"):
     cap = (f"🔐 <b>{BRAND} · {esc(name)}</b> · {title}\n{hint}\n\n"
            f"📥 <b>Скачать AmneziaVPN</b>{' ' + esc(v) if v else ''}: <a href=\"{AMNEZIA_IOS}\">iPhone</a> · "
            f"<a href=\"{AMNEZIA_ANDROID}\">Android</a> · <a href=\"{AMNEZIA_LATEST}\">Windows / Mac</a>\n\n"
-           f"1. Открой Amnezia → «+» → «Подключиться по ключу»\n"
-           f"2. Отсканируй этот QR или открой файл ниже\n"
+           f"1. Amnezia → «+» → «Подключиться по ключу»\n"
+           f"2. Отсканируй этот QR, или открой файл ниже, или вставь ключ из него\n"
            f"3. Включи. Готово.")
     send_photo(chat, d / f"{stem}.png", cap, card_buttons(name, variant))
     key = key_f.read_text().strip()
     fname = f"{BRAND}-{name}{'' if variant == 'amnezia' else '-' + variant}.vpn"
-    spoiler = f"Ключ текстом (нажми, чтобы раскрыть и скопировать):\n<tg-spoiler>{esc(key)}</tg-spoiler>"
-    if len(spoiler) <= 1000: send_doc(chat, key.encode(), fname, spoiler)
-    else:
-        send_doc(chat, key.encode(), fname, "Файл ключа: открой его в Amnezia."); send(chat, spoiler)
+    send_doc(chat, key.encode(), fname, f"<code>{esc(key)}</code>" if len(key) <= 1000 else "Ключ внутри файла: открой его в Amnezia.")
 
 def card_happ(chat, name):
     d = CLIENTS / name; link = d / "sub.txt"
     if not link.exists(): return send(chat, f"У {esc(name)} нет подписки")
-    cap = (f"🍏 <b>{BRAND} · {esc(name)}</b> · Happ\nОдна ссылка на все наши серверы, приложение само выбирает живой.\n\n"
+    url = link.read_text().strip()
+    cap = (f"🍏 <b>{BRAND} · {esc(name)}</b> · Happ, авто-выбор сервера\n"
+           f"Одна ссылка на все наши серверы (Амстердам, запасной, вход через Россию). Happ сам держится за живой и быстрый. AmneziaWG сюда не входит.\n\n"
            f"📥 <b>Скачать Happ</b>: <a href=\"{HAPP_IOS}\">iPhone</a> · <a href=\"{HAPP_ANDROID}\">Android</a> · <a href=\"{HAPP_SITE}\">Windows / Mac</a>\n\n"
-           f"1. Happ → «+» → «Сканировать QR»\n2. Готово.\n\n<tg-spoiler>{esc(link.read_text().strip())}</tg-spoiler>")
-    send_photo(chat, d / "sub.png", cap, [[{"text": "🔐 Ключ Amnezia", "callback_data": f"k:{name}:amnezia"}]])
+           f"1. Happ → «+» → «Сканировать QR» или вставить ссылку\n2. Включи авто-выбор сервера. Готово.\n\n<code>{esc(url)}</code>")
+    kb = [[{"text": "📋 Скопировать ссылку", "copy_text": {"text": url}}], *card_buttons(name, "happ")]
+    send_photo(chat, d / "sub.png", cap, kb)
 
 # ── screens ───────────────────────────────────────────────────────────────────
+def mark(sec):
+    if sec is None: return ""
+    return " 🟢" if sec < 180 else ""
+
 def users_screen(chat):
-    us = sorted(users(), key=lambda x: x["name"].lower()); seen = awg_last_seen()
+    us = sorted(users(), key=lambda x: x["name"].lower()); awg = awg_last_seen(); xr = xray_recent_users(5)
     rows, row = [], []
     for u in us:
-        row.append({"text": f"{u['name']}{ago(seen.get(u['name']))}", "callback_data": f"u:{u['name']}"})
+        n = u["name"]; online = (n in xr) or (awg.get(n) is not None and awg[n] < 180)
+        row.append({"text": f"{n}{' 🟢' if online else ''}", "callback_data": f"u:{n}"})
         if len(row) == 2: rows.append(row); row = []
     if row: rows.append(row)
-    rows.append([{"text": "➕ Добавить человека", "callback_data": "add"}, {"text": "📊 Статус нод", "callback_data": "status"}])
-    send(chat, f"👥 <b>{BRAND}</b> · {len(us)} чел.\nНажми на имя — пришлю готовый ключ Amnezia, его можно сразу переслать человеку.", rows)
+    rows.append([{"text": "➕ Добавить человека", "callback_data": "add"}, {"text": "📊 Статус", "callback_data": "status"}])
+    send(chat, f"👥 <b>{BRAND}</b> · {len(us)} чел. · 🟢 = в сети сейчас\nНажми на имя — пришлю готовый ключ, его можно сразу переслать человеку.", rows)
+
+def node_probe(host, sni):
+    try:
+        rc, out = sh(["curl", "-sk", "-o", "/dev/null", "-w", "%{http_code}", "-m", "6", "--resolve", f"{sni}:443:{host}", f"https://{sni}/"], timeout=12)
+        return out.strip() not in ("", "000")
+    except Exception: return False
+
+def status_screen(chat):
+    E = load_env(ETC / "vpn.env")
+    def svc(u): return subprocess.run(["systemctl", "is-active", "--quiet", u]).returncode == 0
+    lines = [f"📊 <b>{BRAND}</b> · {time.strftime('%d.%m %H:%M')}"]
+    nl_ok = svc("xray") and node_probe("127.0.0.1", E.get("DOMAIN", "")); awg_ok = svc("awg-quick@awg0")
+    lines.append(f"{'🟢' if nl_ok else '🔴'} Амстердам, основной · xray {'ok' if svc('xray') else 'DOWN'} · AWG {'ok' if awg_ok else 'DOWN'} · {E.get('SERVER_IP','')}")
+    if E.get("EXIT2_HOST"): lines.append(f"{'🟢' if node_probe(E['EXIT2_HOST'], E.get('EXIT2_DOMAIN','')) else '🔴'} Запасной выход · {E['EXIT2_HOST']}")
+    if E.get("RU_HOST"): lines.append(f"{'🟢' if node_probe(E['RU_HOST'], E.get('RU_SNI','yandex.ru')) else '🔴'} Вход через Россию · {E['RU_HOST']}")
+    cert = E.get("CERT_DIR", ""); lines.append(f"{'🟢' if 'letsencrypt' in cert else '🟡'} Сертификат: {'Let’s Encrypt' if 'letsencrypt' in cert else 'самоподписанный, DNS ещё едет'}")
+    sites = (STATE / "services.last").read_text().strip() if (STATE / "services.last").exists() else ""
+    lines.append(f"{'🟠 Недоступны с сервера: ' + esc(sites) if sites else '🟢 YouTube, Google, Instagram, Telegram, ChatGPT и остальные открываются'}")
+    xr = xray_recent_users(5); awg = awg_last_seen()
+    online = sorted({n for n, c in xr.items()} | {n for n, s in awg.items() if s is not None and s < 180})
+    lines.append(f"👥 В сети сейчас: {', '.join(esc(n) for n in online) if online else 'никого'}")
+    failing = (STATE / "health.state").read_text().split() if (STATE / "health.state").exists() else []
+    failing = [f for f in failing if f != "selfsigned"]
+    if failing: lines.append(f"⚠️ Открытые проблемы: {esc(', '.join(failing))}")
+    try:
+        last = [l for l in (pathlib.Path("/var/log/vpn-health.log").read_text().splitlines()) if "FAIL" in l or "OK " in l][-3:]
+        if last: lines.append("🕓 Последние события:\n" + "\n".join("  " + esc(l[:100]) for l in last))
+    except Exception: pass
+    send(chat, "\n".join(lines))
 
 def do_add(chat, name):
     if not NAME_RE.match(name): return send(chat, "Имя латиницей, цифры, - и _, до 32 символов. Попробуй ещё раз: /add Имя")
-    if find_user(name): return send(chat, f"{esc(name)} уже есть.");
+    if find_user(name): return send(chat, f"{esc(name)} уже есть.")
     send(chat, f"⏳ Создаю {esc(name)} на всех нодах…")
     rc, out = sh(["/usr/local/bin/add-client.sh", name])
     if rc != 0: return send(chat, f"❌ не получилось:\n<pre>{esc(out[-1500:])}</pre>")
@@ -175,10 +218,6 @@ def do_del(chat, name):
     rc, out = sh(["/usr/local/bin/del-client.sh", name])
     send(chat, f"🗑 {esc(name)} удалён везде" if rc == 0 else f"❌ ошибка:\n<pre>{esc(out[-1500:])}</pre>")
 
-def do_status(chat):
-    rc, out = sh(["/usr/local/bin/vpn-status.sh"], timeout=60)
-    send(chat, f"<pre>{esc(out[-3800:])}</pre>")
-
 def do_newip(chat):
     if not ENV.get("TW_API_TOKEN") or not ENV.get("TW_SERVER_ID"):
         return send(chat, "Нет TW_API_TOKEN / TW_SERVER_ID в /etc/safechill/vpn.env — без ключа Timeweb IP менять нечем.")
@@ -186,8 +225,8 @@ def do_newip(chat):
     rc, out = sh(["/usr/local/bin/rotate-ip.sh"], timeout=600)
     send(chat, ("✅ " if rc == 0 else "❌ ") + f"<pre>{esc(out[-2500:])}</pre>")
 
-HELP = (f"🔐 <b>{BRAND}</b>\n/users — люди кнопками: нажал на имя → готовый ключ Amnezia для пересылки\n"
-        "/add Имя — новый человек\n/status — состояние нод\n/newip — новый IPv4 основной ноды, если старый заблокировали\n"
+HELP = (f"🔐 <b>{BRAND}</b>\n/users — люди кнопками: нажал на имя → готовый ключ для пересылки\n"
+        "/add Имя — новый человек\n/status — состояние нод по-человечески\n/newip — новый IPv4 основной ноды, если старый заблокировали\n"
         "/dropip 1.2.3.4 — отпустить лишний IP (сервер перезагрузится)")
 
 # ── dispatch ──────────────────────────────────────────────────────────────────
@@ -216,7 +255,7 @@ def on_message(msg):
             name = find_user(args[0]) if args else None
             if not name: return send(chat, "/del Имя")
             send(chat, f"Удалить {esc(name)} везде?", [[{"text": f"Да, удалить {name}", "callback_data": f"dy:{name}"}, {"text": "Отмена", "callback_data": "noop"}]])
-        elif cmd == "/status": do_status(chat)
+        elif cmd == "/status": status_screen(chat)
         elif cmd == "/newip": do_newip(chat)
         elif cmd == "/dropip":
             if not args: return send(chat, "/dropip 1.2.3.4")
@@ -239,7 +278,7 @@ def on_callback(cq):
         elif kind == "d": send(chat, f"Удалить {esc(rest)} везде? Ключи перестанут работать сразу.", [[{"text": f"Да, удалить {rest}", "callback_data": f"dy:{rest}"}, {"text": "Отмена", "callback_data": "noop"}]])
         elif kind == "dy": do_del(chat, rest)
         elif kind == "add": PENDING_ADD.add(chat); send(chat, "Напиши имя нового человека (латиницей):")
-        elif kind == "status": do_status(chat)
+        elif kind == "status": status_screen(chat)
     except Exception as e:  # noqa: BLE001
         log("error", repr(e)); send(chat, f"❌ {esc(str(e)[:500])}")
 
@@ -248,6 +287,7 @@ def main():
     if len(sys.argv) >= 4 and sys.argv[1] == "--card":
         name = find_user(sys.argv[2]) or sys.exit(f"unknown user {sys.argv[2]}")
         card(int(sys.argv[3]), name, sys.argv[4] if len(sys.argv) > 4 else "amnezia"); return
+    if len(sys.argv) >= 3 and sys.argv[1] == "--status": status_screen(int(sys.argv[2])); return
     try:
         api("setMyCommands", commands=[{"command": "users", "description": "люди и их ключи"}, {"command": "add", "description": "добавить человека"},
                                        {"command": "status", "description": "состояние нод"}, {"command": "newip", "description": "новый IPv4 основной ноды"},
