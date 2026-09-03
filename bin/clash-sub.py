@@ -76,7 +76,7 @@ def main():
     if P:
         add(awg("⚡ AWG Амстердам", V["SERVER_IP"]), awg_order)
         if V.get("EXIT2_HOST"): add(awg("⚡ AWG Запасной", V["EXIT2_HOST"]), awg_order)
-        if V.get("SERVER_IP6"): add(awg("⚡ AWG Амстердам (IPv6)", V["SERVER_IP6"]), awg_order)
+        # no AWG over IPv6: UDP to the exit's IPv6 does not pass from Russian networks in tests
 
     groups = [
         {"name": f"🔐 {brand}", "type": "select",
