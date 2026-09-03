@@ -22,11 +22,11 @@ report() { local key=$1 rc=$2 msg=$3 fix=${4:-}
 }
 # own xray: REALITY steal must answer like the pretended site
 code=$(curl -sk -o /dev/null -w '%{http_code}' -m 8 --resolve "$RU_SNI:443:127.0.0.1" "https://$RU_SNI/" || true)
-[ "$code" != 000 ] && [ -n "$code" ]; report self "xray RU-входа :443 (HTTP $code)" "systemctl restart xray"
+[ "$code" != 000 ] && [ -n "$code" ]; report self $? "xray RU-входа :443 (HTTP $code)" "systemctl restart xray"
 # exit node from Russia: 443 steal site and 8443 icloud certificate
 code=$(curl -sk -o /dev/null -w '%{http_code}' -m 8 --resolve "$DOMAIN:443:$NL_IP" "https://$DOMAIN/" || true)
-[ "$code" = 200 ]; report nl443 "NL-выход $NL_IP :443 недоступен из России (HTTP $code)"
+[ "$code" = 200 ]; report nl443 $? "NL-выход $NL_IP :443 недоступен из России (HTTP $code)"
 timeout 8 openssl s_client -connect "$NL_IP:$TCP_PORT" -servername "$FALLBACK_SNI" </dev/null 2>/dev/null | grep -q "CN *= *$FALLBACK_SNI"
-report nl8443 "NL-выход $NL_IP :$TCP_PORT недоступен из России"
+report nl8443 $? "NL-выход $NL_IP :$TCP_PORT недоступен из России"
 echo "$(date +%FT%T) checked, failing=$(wc -l < "$STATE")" >> "$LOG"
 tail -n 1000 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
