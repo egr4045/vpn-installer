@@ -79,7 +79,8 @@ if [ -n "${RU_HOST:-}" ]; then
   { echo "BRAND=${BRAND:-SafeChill}"; echo "NL_IP=$SERVER_IP"; echo "DOMAIN=$DOMAIN"; echo "TCP_PORT=$TCP_PORT"
     echo "FALLBACK_SNI=$FALLBACK_SNI"; echo "RU_SNI=$RU_SNI"; echo "TG_BOT_TOKEN=${TG_BOT_TOKEN:-}"
     echo "TG_CHAT_ID=${TG_CHAT_ID:-$(cat "$ETC/tg_chat_id" 2>/dev/null || true)}"
-    echo "EXIT2_HOST=${EXIT2_HOST:-}"; echo "EXIT2_DOMAIN=${EXIT2_DOMAIN:-}"; } > "$t3"
+    echo "EXIT2_HOST=${EXIT2_HOST:-}"; echo "EXIT2_DOMAIN=${EXIT2_DOMAIN:-}"; echo "NL_IP6=${SERVER_IP6:-}"
+    echo "NODE_NAME=${RU_NODE_NAME:-Москва}"; echo "EXIT_NAME=${NODE_NAME:-Амстердам}"; } > "$t3"
   if scp "${SSHOPT[@]}" -q "$t2" "root@$RU_HOST:/usr/local/etc/xray/config.json" \
      && scp "${SSHOPT[@]}" -q "$t3" "root@$RU_HOST:/etc/safechill/ru.env" \
      && ssh "${SSHOPT[@]}" "root@$RU_HOST" "chmod 644 /usr/local/etc/xray/config.json; chmod 600 /etc/safechill/ru.env; systemctl restart xray && systemctl is-active xray" >/dev/null; then

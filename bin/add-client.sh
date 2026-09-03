@@ -59,21 +59,22 @@ tcp_link() {
   qrencode -o "$D/$1.png" -s 6 < "$D/$1.txt"; ORDER+=("$1"); }
 awg_conf() { ENDPOINT="$2" envsubst < "$TPL/awg-client.conf.tpl" > "$D/$1.conf"; qrencode -o "$D/$1.png" -s 5 < "$D/$1.conf"; }
 
-xhttp_link nl-xhttp "$SERVER_IP" "$DOMAIN" firefox NL
-[ -n "${SERVER_IP6:-}" ] && xhttp_link nl6-xhttp "[$SERVER_IP6]" "$DOMAIN" firefox NL6
-[ -n "${EXIT2_HOST:-}" ] && xhttp_link x2-xhttp "$EXIT2_HOST" "$EXIT2_DOMAIN" firefox X2
+# order = client preference: RU entry first (white lists, server-side failover), then exits directly
 if [ -n "${RU_HOST:-}" ]; then
   RU_SNI=${RU_SNI:-yandex.ru}
   xhttp_link ru-xhttp "$RU_HOST" "$RU_SNI" chrome RU
   [ -n "${RU_HOST6:-}" ] && xhttp_link ru6-xhttp "[$RU_HOST6]" "$RU_SNI" chrome RU6
 fi
-tcp_link nl-tcp "$SERVER_IP" "$FALLBACK_SNI" chrome NL
-[ -n "${SERVER_IP6:-}" ] && tcp_link nl6-tcp "[$SERVER_IP6]" "$FALLBACK_SNI" chrome NL6
-[ -n "${EXIT2_HOST:-}" ] && tcp_link x2-tcp "$EXIT2_HOST" "$FALLBACK_SNI" chrome X2
+xhttp_link nl-xhttp "$SERVER_IP" "$DOMAIN" firefox NL
+[ -n "${SERVER_IP6:-}" ] && xhttp_link nl6-xhttp "[$SERVER_IP6]" "$DOMAIN" firefox NL6
+[ -n "${EXIT2_HOST:-}" ] && xhttp_link x2-xhttp "$EXIT2_HOST" "$EXIT2_DOMAIN" firefox X2
 if [ -n "${RU_HOST:-}" ]; then
   tcp_link ru-tcp "$RU_HOST" "$RU_SNI" chrome RU
   [ -n "${RU_HOST6:-}" ] && tcp_link ru6-tcp "[$RU_HOST6]" "$RU_SNI" chrome RU6
 fi
+tcp_link nl-tcp "$SERVER_IP" "$FALLBACK_SNI" chrome NL
+[ -n "${SERVER_IP6:-}" ] && tcp_link nl6-tcp "[$SERVER_IP6]" "$FALLBACK_SNI" chrome NL6
+[ -n "${EXIT2_HOST:-}" ] && tcp_link x2-tcp "$EXIT2_HOST" "$FALLBACK_SNI" chrome X2
 awg_conf awg "$SERVER_IP:$AWG_PORT"
 [ -n "${SERVER_IP6:-}" ] && awg_conf awg6 "[$SERVER_IP6]:$AWG_PORT"
 [ -n "${EXIT2_HOST:-}" ] && awg_conf awg-x2 "$EXIT2_HOST:$AWG_PORT"
@@ -86,9 +87,12 @@ amnezia-key.py "$NAME" nl >/dev/null
 amnezia-key.py "$NAME" nl awg >/dev/null
 [ -n "${RU_HOST:-}" ] && amnezia-key.py "$NAME" ru >/dev/null
 [ -n "${EXIT2_HOST:-}" ] && amnezia-key.py "$NAME" x2 >/dev/null
+# mihomo / Clash Meta profile (ClashMi etc.): everything in one subscription with auto RU -> Amsterdam
+clash-sub.py "$NAME" >/dev/null
 chmod 600 "$D"/*
 echo; echo "== $NAME =="
-echo "ONE-QR subscription (Happ etc.): $(cat "$D/sub.txt")"; echo
+echo "ONE-QR subscription (Happ etc.): $(cat "$D/sub.txt")"
+echo "Clash/mihomo profile (ClashMi):  $(cat "$D/clash.txt")"; echo
 echo "AmneziaVPN one-QR key (xray+AWG): $D/amnezia.txt ($(wc -c < "$D/amnezia.txt") chars)"; echo
 echo "NL XHTTP (main, AmneziaVPN):     $(cat "$D/nl-xhttp.txt")"; echo
 echo "all files:                       $(ls "$D" | tr '\n' ' ')"

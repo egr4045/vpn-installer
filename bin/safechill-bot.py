@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """safechill-bot — Telegram admin bot for the exit node (stdlib only, long polling).
 
-UX: /users shows every person as a button. Tapping a person sends a ready-to-forward AmneziaVPN card:
-one photo (QR) with download links + 3 steps, then the key as a .vpn file whose caption is the key
-itself in monospace (tap = copy). Buttons under the card: AWG (speed), RU (white lists), standby exit,
-HAPP (auto-select), delete. Admins only (TG_ADMIN_IDS in /etc/safechill/vpn.env).
+UX: /users shows every person as a button. Tapping a person sends a ready-to-forward card for the
+default profile (the RU entry): one photo (QR) with download links + 3 steps, then the key as a .vpn
+file whose caption is the key itself in monospace (tap = copy). Buttons under the card: the other
+Amnezia variants, ClashMi (everything in one subscription), Happ, delete. Admins only
+(TG_ADMIN_IDS in /etc/safechill/vpn.env).
 
 Commands: /users  /add <name>  /status  /newip  /dropip <ip>  /help   (also /qr <name> [variant])
-CLI: safechill-bot.py --card <name> <chat_id> [amnezia|awg|ru|x2|happ]
+CLI: safechill-bot.py --card <name> <chat_id> [ru|nl|awg|x2|happ|clash]   (default: ru)
+     safechill-bot.py --status <chat_id>
 """
 import json, re, subprocess, sys, time, urllib.request, uuid, html, pathlib
 
@@ -20,6 +22,9 @@ AMNEZIA_ANDROID = "https://play.google.com/store/apps/details?id=org.amnezia.vpn
 HAPP_IOS = "https://apps.apple.com/us/app/happ-proxy-utility/id6504287215"
 HAPP_ANDROID = "https://play.google.com/store/apps/details?id=com.happproxy"
 HAPP_SITE = "https://www.happ.su/main/ru"
+CLASHMI_IOS = "https://apps.apple.com/us/app/clash-mi/id6744321968"
+CLASHMI_ALL = "https://github.com/KaringX/clashmi/releases/latest"
+CLASHMI_SITE = "https://clashmi.app/download"
 
 def load_env(p):
     env = {}
@@ -114,28 +119,40 @@ def sh(cmd, timeout=180):
 
 # ── cards ─────────────────────────────────────────────────────────────────────
 VARIANTS = {  # variant -> (file stem, short title, one-line hint)
-    "amnezia": ("amnezia",     "основной",                        "Амстердам. Ставь этот."),
-    "awg":     ("amnezia-awg", "AWG, максимальная скорость",       "Тот же сервер по протоколу AmneziaWG: быстрее дома по Wi-Fi и на ПК. На мобильном интернете может не работать, тогда вернись к основному."),
-    "ru":      ("amnezia-ru",  "RU, белые списки",                 "Для мобильного интернета в дни, когда не открывается ничего иностранного. Выход всё равно Амстердам."),
-    "x2":      ("amnezia-x2",  "запасной выход",                   "Если основной Амстердам вдруг недоступен."),
+    "ru":  ("amnezia-ru",  "основной",
+            "Вход через Россию, выход в Амстердаме. Работает и на мобильном в дни белых списков, при падении Амстердама сам переключается на запасной выход. Ставь этот."),
+    "nl":  ("amnezia",     "Амстердам напрямую",
+            "Запасной вариант: если вход через Россию вдруг не подключается."),
+    "awg": ("amnezia-awg", "AWG, максимальная скорость",
+            "Амстердам по протоколу AmneziaWG: быстрее дома по Wi-Fi и на ПК. На мобильном интернете может не работать, тогда вернись к основному."),
+    "x2":  ("amnezia-x2",  "запасной выход напрямую",
+            "Если и Россия, и Амстердам недоступны."),
 }
-BTN = {"amnezia": "🟢 Основной", "awg": "⚡ AWG (макс. скорость)", "ru": "🇷🇺 RU (белые списки)", "x2": "🛟 Запасной (если основной упал)"}
+BTN = {"ru": "🇷🇺 Основной (через Россию)", "nl": "🟢 Амстердам напрямую",
+       "awg": "⚡ AWG (макс. скорость)", "x2": "🛟 Запасной выход"}
+
+def default_variant(name):
+    return "ru" if (CLIENTS / name / "amnezia-ru.txt").exists() else "nl"
 
 def card_buttons(name, current):
     rows, row = [], []
-    for v in ("amnezia", "awg", "ru", "x2"):
+    for v in ("ru", "nl", "awg", "x2"):
         if v != current and (CLIENTS / name / f"{VARIANTS[v][0]}.txt").exists():
             row.append({"text": BTN[v], "callback_data": f"k:{name}:{v}"})
             if len(row) == 2: rows.append(row); row = []
     if row: rows.append(row)
-    last = [{"text": "🗑 Удалить", "callback_data": f"d:{name}"}]
-    if current != "happ": last.insert(0, {"text": "🍏 HAPP (авто-выбор сервера)", "callback_data": f"k:{name}:happ"})
-    rows.append(last)
+    extra = []
+    if current != "clash": extra.append({"text": "🧩 ClashMi (всё в одном)", "callback_data": f"k:{name}:clash"})
+    if current != "happ": extra.append({"text": "🍏 HAPP (авто-выбор)", "callback_data": f"k:{name}:happ"})
+    rows.append(extra)
+    rows.append([{"text": "🗑 Удалить", "callback_data": f"d:{name}"}])
     return rows
 
-def card(chat, name, variant="amnezia"):
+def card(chat, name, variant=None):
     """Photo (QR + instructions), then the key as a .vpn file whose caption is the key in monospace."""
+    variant = variant or default_variant(name)
     if variant == "happ": return card_happ(chat, name)
+    if variant == "clash": return card_clash(chat, name)
     stem, title, hint = VARIANTS[variant]; d = CLIENTS / name; key_f = d / f"{stem}.txt"
     if not key_f.exists(): return send(chat, f"У {esc(name)} нет варианта «{title}» (такой ноды нет)")
     v = amnezia_latest()
@@ -147,25 +164,34 @@ def card(chat, name, variant="amnezia"):
            f"3. Включи. Готово.")
     send_photo(chat, d / f"{stem}.png", cap, card_buttons(name, variant))
     key = key_f.read_text().strip()
-    fname = f"{BRAND}-{name}{'' if variant == 'amnezia' else '-' + variant}.vpn"
-    send_doc(chat, key.encode(), fname, f"<code>{esc(key)}</code>" if len(key) <= 1000 else "Ключ внутри файла: открой его в Amnezia.")
+    send_doc(chat, key.encode(), f"{BRAND}-{name}-{variant}.vpn",
+             f"<code>{esc(key)}</code>" if len(key) <= 1000 else "Ключ внутри файла: открой его в Amnezia.")
+
+def card_clash(chat, name):
+    d = CLIENTS / name; link = d / "clash.txt"
+    if not link.exists(): return send(chat, f"У {esc(name)} нет Clash-профиля, запусти /add {esc(name)} повторно")
+    url = link.read_text().strip()
+    cap = (f"🧩 <b>{BRAND} · {esc(name)}</b> · ClashMi, всё в одном\n"
+           f"Одна подписка: все серверы, обычный протокол и AmneziaWG, авто-переключение Россия → Амстердам → запасной, российские сайты напрямую.\n\n"
+           f"📥 <b>Скачать ClashMi</b>: <a href=\"{CLASHMI_IOS}\">iPhone</a> · <a href=\"{CLASHMI_ALL}\">Android / Windows / Mac</a> · <a href=\"{CLASHMI_SITE}\">сайт</a>\n\n"
+           f"1. ClashMi → «+» → добавить профиль по ссылке: вставь ссылку (кнопка ниже копирует) или отсканируй QR\n"
+           f"2. Выбери профиль {BRAND}, оставь группу «⚡ Авто»\n"
+           f"3. Включи. Готово.\n\n<code>{esc(url)}</code>")
+    kb = [[{"text": "📋 Скопировать ссылку", "copy_text": {"text": url}}], *card_buttons(name, "clash")]
+    send_photo(chat, d / "clash.png", cap, kb)
 
 def card_happ(chat, name):
     d = CLIENTS / name; link = d / "sub.txt"
     if not link.exists(): return send(chat, f"У {esc(name)} нет подписки")
     url = link.read_text().strip()
     cap = (f"🍏 <b>{BRAND} · {esc(name)}</b> · Happ, авто-выбор сервера\n"
-           f"Одна ссылка на все наши серверы (Амстердам, запасной, вход через Россию). Happ сам держится за живой и быстрый. AmneziaWG сюда не входит.\n\n"
+           f"Одна ссылка на все наши серверы (вход через Россию, Амстердам, запасной). Happ сам держится за живой. AmneziaWG сюда не входит.\n\n"
            f"📥 <b>Скачать Happ</b>: <a href=\"{HAPP_IOS}\">iPhone</a> · <a href=\"{HAPP_ANDROID}\">Android</a> · <a href=\"{HAPP_SITE}\">Windows / Mac</a>\n\n"
            f"1. Happ → «+» → «Сканировать QR» или вставить ссылку\n2. Включи авто-выбор сервера. Готово.\n\n<code>{esc(url)}</code>")
     kb = [[{"text": "📋 Скопировать ссылку", "copy_text": {"text": url}}], *card_buttons(name, "happ")]
     send_photo(chat, d / "sub.png", cap, kb)
 
 # ── screens ───────────────────────────────────────────────────────────────────
-def mark(sec):
-    if sec is None: return ""
-    return " 🟢" if sec < 180 else ""
-
 def users_screen(chat):
     us = sorted(users(), key=lambda x: x["name"].lower()); awg = awg_last_seen(); xr = xray_recent_users(5)
     rows, row = [], []
@@ -188,20 +214,20 @@ def status_screen(chat):
     def svc(u): return subprocess.run(["systemctl", "is-active", "--quiet", u]).returncode == 0
     lines = [f"📊 <b>{BRAND}</b> · {time.strftime('%d.%m %H:%M')}"]
     nl_ok = svc("xray") and node_probe("127.0.0.1", E.get("DOMAIN", "")); awg_ok = svc("awg-quick@awg0")
-    lines.append(f"{'🟢' if nl_ok else '🔴'} Амстердам, основной · xray {'ok' if svc('xray') else 'DOWN'} · AWG {'ok' if awg_ok else 'DOWN'} · {E.get('SERVER_IP','')}")
+    lines.append(f"{'🟢' if nl_ok else '🔴'} Амстердам, основной выход · xray {'ok' if svc('xray') else 'DOWN'} · AWG {'ok' if awg_ok else 'DOWN'} · {E.get('SERVER_IP','')}")
     if E.get("EXIT2_HOST"): lines.append(f"{'🟢' if node_probe(E['EXIT2_HOST'], E.get('EXIT2_DOMAIN','')) else '🔴'} Запасной выход · {E['EXIT2_HOST']}")
     if E.get("RU_HOST"): lines.append(f"{'🟢' if node_probe(E['RU_HOST'], E.get('RU_SNI','yandex.ru')) else '🔴'} Вход через Россию · {E['RU_HOST']}")
     cert = E.get("CERT_DIR", ""); lines.append(f"{'🟢' if 'letsencrypt' in cert else '🟡'} Сертификат: {'Let’s Encrypt' if 'letsencrypt' in cert else 'самоподписанный, DNS ещё едет'}")
     sites = (STATE / "services.last").read_text().strip() if (STATE / "services.last").exists() else ""
     lines.append(f"{'🟠 Недоступны с сервера: ' + esc(sites) if sites else '🟢 YouTube, Google, Instagram, Telegram, ChatGPT и остальные открываются'}")
     xr = xray_recent_users(5); awg = awg_last_seen()
-    online = sorted({n for n, c in xr.items()} | {n for n, s in awg.items() if s is not None and s < 180})
+    online = sorted({n for n in xr} | {n for n, s in awg.items() if s is not None and s < 180})
     lines.append(f"👥 В сети сейчас: {', '.join(esc(n) for n in online) if online else 'никого'}")
     failing = (STATE / "health.state").read_text().split() if (STATE / "health.state").exists() else []
     failing = [f for f in failing if f != "selfsigned"]
     if failing: lines.append(f"⚠️ Открытые проблемы: {esc(', '.join(failing))}")
     try:
-        last = [l for l in (pathlib.Path("/var/log/vpn-health.log").read_text().splitlines()) if "FAIL" in l or "OK " in l][-3:]
+        last = [l for l in pathlib.Path("/var/log/vpn-health.log").read_text().splitlines() if "FAIL" in l or "OK " in l][-3:]
         if last: lines.append("🕓 Последние события:\n" + "\n".join("  " + esc(l[:100]) for l in last))
     except Exception: pass
     send(chat, "\n".join(lines))
@@ -212,7 +238,7 @@ def do_add(chat, name):
     send(chat, f"⏳ Создаю {esc(name)} на всех нодах…")
     rc, out = sh(["/usr/local/bin/add-client.sh", name])
     if rc != 0: return send(chat, f"❌ не получилось:\n<pre>{esc(out[-1500:])}</pre>")
-    card(chat, name, "amnezia")
+    card(chat, name)
 
 def do_del(chat, name):
     rc, out = sh(["/usr/local/bin/del-client.sh", name])
@@ -247,10 +273,10 @@ def on_message(msg):
             if args: do_add(chat, args[0])
             else: PENDING_ADD.add(chat); send(chat, "Напиши имя нового человека (латиницей):")
         elif cmd == "/qr":
-            if not args: return send(chat, "/qr Имя [amnezia|awg|ru|x2|happ]")
-            name = find_user(args[0]); v = (args[1].lower() if len(args) > 1 else "amnezia")
+            if not args: return send(chat, "/qr Имя [ru|nl|awg|x2|happ|clash]")
+            name = find_user(args[0]); v = args[1].lower() if len(args) > 1 else None
             if not name: return send(chat, f"Не знаю «{esc(args[0])}»")
-            card(chat, name, v if v in VARIANTS or v == "happ" else "amnezia")
+            card(chat, name, v if (v in VARIANTS or v in ("happ", "clash")) else None)
         elif cmd == "/del":
             name = find_user(args[0]) if args else None
             if not name: return send(chat, "/del Имя")
@@ -272,7 +298,7 @@ def on_callback(cq):
     log("cb", data, "from", frm)
     try:
         kind, _, rest = data.partition(":")
-        if kind == "u": card(chat, rest, "amnezia")
+        if kind == "u": card(chat, rest)
         elif kind == "k":
             name, _, v = rest.partition(":"); card(chat, name, v)
         elif kind == "d": send(chat, f"Удалить {esc(rest)} везде? Ключи перестанут работать сразу.", [[{"text": f"Да, удалить {rest}", "callback_data": f"dy:{rest}"}, {"text": "Отмена", "callback_data": "noop"}]])
@@ -286,7 +312,7 @@ def main():
     if not TOKEN: sys.exit("TG_BOT_TOKEN missing in /etc/safechill/vpn.env")
     if len(sys.argv) >= 4 and sys.argv[1] == "--card":
         name = find_user(sys.argv[2]) or sys.exit(f"unknown user {sys.argv[2]}")
-        card(int(sys.argv[3]), name, sys.argv[4] if len(sys.argv) > 4 else "amnezia"); return
+        card(int(sys.argv[3]), name, sys.argv[4] if len(sys.argv) > 4 else None); return
     if len(sys.argv) >= 3 and sys.argv[1] == "--status": status_screen(int(sys.argv[2])); return
     try:
         api("setMyCommands", commands=[{"command": "users", "description": "люди и их ключи"}, {"command": "add", "description": "добавить человека"},
