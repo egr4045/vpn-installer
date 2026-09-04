@@ -33,6 +33,17 @@ FORCE_PROXY = [
     "linkedin.com", "medium.com", "signal.org", "spotify.com", "scdn.co", "soundcloud.com",
 ]
 
+# The mirror image: Russian sites leave from the user's own provider. Through the tunnel they take a
+# Moscow -> Amsterdam -> Moscow hairpin (+80 ms measured), and a bank or gosuslugi that sees a Dutch
+# address tends to refuse the session outright. GEOIP,RU below is only a backstop: under fake-ip it
+# fires after a resolution that may never geolocate right, so the names are matched first. Anything
+# here that is blocked INSIDE Russia belongs in FORCE_PROXY instead — that list is matched earlier.
+RU_DIRECT = [
+    "ru", "xn--p1ai", "su",                       # .ru, .рф, .su wholesale
+    "vk.com", "vk.me", "vk-cdn.net", "vkuser.net", "vkuservideo.net", "userapi.com", "mycdn.me",
+    "yandex.net", "yandex.com", "ya.cc", "avito.st", "ozonusercontent.com", "2gis.com", "sberbank.com",
+]
+
 def load_env(p):
     env = {}
     for line in pathlib.Path(p).read_text().splitlines():
@@ -120,10 +131,19 @@ def main():
         "geodata-mode": False, "geo-auto-update": True, "geo-update-interval": 168,
         "profile": {"store-selected": True, "store-fake-ip": True},
         "sniffer": {"enable": True, "sniff": {"HTTP": {"ports": [80, 8080]}, "TLS": {"ports": [443, 8443]}}},
-        "dns": {"enable": True, "ipv6": True, "enhanced-mode": "fake-ip", "fake-ip-range": "198.18.0.1/16",
+        # respect-rules puts every lookup through the same rules as the traffic it is for. Without it the
+        # DoH servers are dialled straight from the user's Russian provider, where both 1.1.1.1 and
+        # dns.google are throttled, and each first visit to a domain waits out that timeout. With it they
+        # ride the tunnel, while a .ru name is answered DIRECT by a Russian resolver — so Russian CDNs
+        # still return their nearest cache and not one chosen for Amsterdam.
+        # 198.19 and not 198.18: ClashMi puts its own TUN interface on 198.18.0.1/30, and a fake IP handed
+        # out from inside that subnet is answered by the interface instead of being routed anywhere.
+        "dns": {"enable": True, "ipv6": True, "enhanced-mode": "fake-ip", "fake-ip-range": "198.19.0.1/16",
                 "fake-ip-filter": ["*.lan", "*.local", "localhost.ptlogin2.qq.com", "+.msftconnecttest.com", "+.msftncsi.com", "+.pool.ntp.org"],
-                "default-nameserver": ["1.1.1.1", "8.8.8.8"],
+                "respect-rules": True,
+                "default-nameserver": ["77.88.8.8", "1.1.1.1", "8.8.8.8"],
                 "nameserver": ["https://1.1.1.1/dns-query", "https://dns.google/dns-query"],
+                "nameserver-policy": {"+.ru,+.xn--p1ai,+.su": ["77.88.8.8", "77.88.8.1"]},
                 "proxy-server-nameserver": ["https://1.1.1.1/dns-query", "https://dns.google/dns-query"]},
         "proxies": proxies, "proxy-groups": groups,
         "rules": [
@@ -134,9 +154,13 @@ def main():
              # otherwise hairpin: into the tunnel, out at the exit, back across Europe to that node
              for h in dict.fromkeys(filter(None, [V.get("SERVER_IP"), V.get("SERVER_IP6"), V.get("EXIT2_HOST"),
                                                   V.get("RU_HOST"), V.get("RU_HOST6")]))] + [
+            # the Russian resolver that nameserver-policy sends .ru lookups to, pinned direct: answered
+            # from Amsterdam it would hand back the CDN node nearest Amsterdam for every Russian site
+            "IP-CIDR,77.88.8.0/24,DIRECT,no-resolve",
             "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve", "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve", "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
             "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve", "IP-CIDR,100.64.0.0/10,DIRECT,no-resolve", "IP-CIDR6,fc00::/7,DIRECT,no-resolve", "IP-CIDR6,fe80::/10,DIRECT,no-resolve",
-        ] + [f"DOMAIN-SUFFIX,{d},🔐 {brand}" for d in FORCE_PROXY] + [
+        ] + [f"DOMAIN-SUFFIX,{d},🔐 {brand}" for d in FORCE_PROXY]
+          + [f"DOMAIN-SUFFIX,{d},DIRECT" for d in RU_DIRECT] + [
             "GEOIP,RU,DIRECT", f"MATCH,🔐 {brand}",
         ],
     }
