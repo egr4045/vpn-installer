@@ -134,6 +134,14 @@ def main():
         ],
     }
     OUT.mkdir(parents=True, exist_ok=True)
+    # Tokens change when users.json is regenerated, and a left-over file keeps serving a UUID xray no
+    # longer knows: the client then fails REALITY silently on every server. Better a 404 than that.
+    live = {x["sub"] for x in users}
+    attic = pathlib.Path("/root/attic/old-clash-subs")
+    for f in OUT.iterdir():
+        if f.is_file() and f.name not in live:
+            attic.mkdir(parents=True, exist_ok=True); f.rename(attic / f.name)
+            print(f"retired stale profile {f.name}")
     text = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False, width=1000) if yaml else json.dumps(cfg, ensure_ascii=False, indent=1)
     (OUT / u["sub"]).write_text(text); (OUT / u["sub"]).chmod(0o644)
     url = f"https://{V['DOMAIN']}/c/{u['sub']}"
