@@ -80,37 +80,39 @@ def main():
                                       "rekey-after-time": rng("AWG_RAT", "100-140"), "keepalive-timeout": rng("AWG_KT", "8-12"),
                                       "random-trailers": True}}
 
-    proxies, main_order, tcp_order, awg_order, v6_order = [], [], [], [], []
-    def add(p, bucket): proxies.append(p); bucket.append(p["name"])
-    # IPv4 first everywhere: desktop ClashMi ships with ipv6 off, so the v6 entries only cost a probe
-    if V.get("RU_HOST"):
-        add(xhttp("🇷🇺 Россия → Амстердам", V["RU_HOST"], V.get("RU_SNI", "yandex.ru"), "chrome"), main_order)
-    add(xhttp("🟢 Амстердам", V["SERVER_IP"], V["DOMAIN"], "firefox"), main_order)
-    if V.get("EXIT2_HOST"): add(xhttp("🛟 Запасной выход", V["EXIT2_HOST"], V["EXIT2_DOMAIN"], "firefox"), main_order)
-    if V.get("RU_HOST") and V.get("RU_HOST6"):
-        add(xhttp("🇷🇺 Россия → Амстердам (IPv6)", V["RU_HOST6"], V.get("RU_SNI", "yandex.ru"), "chrome"), v6_order)
-    if V.get("SERVER_IP6"): add(xhttp("🟢 Амстердам (IPv6)", V["SERVER_IP6"], V["DOMAIN"], "firefox"), v6_order)
-    if V.get("RU_HOST"): add(tcp("🇷🇺 Россия TCP", V["RU_HOST"], V.get("RU_SNI", "yandex.ru"), "chrome"), tcp_order)
-    add(tcp("🟢 Амстердам TCP", V["SERVER_IP"], fallback_sni, "chrome"), tcp_order)
-    if V.get("EXIT2_HOST"): add(tcp("🛟 Запасной TCP", V["EXIT2_HOST"], fallback_sni, "chrome"), tcp_order)
+    proxies, auto_order, spare_order, awg_order = [], [], [], []
+    def add(pr, *buckets):
+        proxies.append(pr)
+        for b in buckets: b.append(pr["name"])
+    # Short names on purpose: ClashMi prints the live member next to its group and truncates hard.
+    # auto_order is the failover order of "Авто"; spare_order is the same servers without the Moscow
+    # hop. IPv6 goes last — desktop ClashMi ships with ipv6 off, so there it only costs one probe.
+    ru, ru_sni = V.get("RU_HOST"), V.get("RU_SNI", "yandex.ru")
+    if ru: add(xhttp("🇷🇺 Россия", ru, ru_sni, "chrome"), auto_order)
+    add(xhttp("🇳🇱 Амстердам", V["SERVER_IP"], V["DOMAIN"], "firefox"), auto_order, spare_order)
+    if V.get("EXIT2_HOST"): add(xhttp("🇳🇱 Амстердам-2", V["EXIT2_HOST"], V["EXIT2_DOMAIN"], "firefox"), auto_order, spare_order)
+    if ru: add(tcp("🇷🇺 Россия TCP", ru, ru_sni, "chrome"), auto_order)
+    add(tcp("🇳🇱 Амстердам TCP", V["SERVER_IP"], fallback_sni, "chrome"), auto_order, spare_order)
+    if V.get("EXIT2_HOST"): add(tcp("🇳🇱 Амстердам-2 TCP", V["EXIT2_HOST"], fallback_sni, "chrome"), auto_order, spare_order)
+    if ru and V.get("RU_HOST6"): add(xhttp("🇷🇺 Россия IPv6", V["RU_HOST6"], ru_sni, "chrome"), auto_order)
+    if V.get("SERVER_IP6"): add(xhttp("🇳🇱 Амстердам IPv6", V["SERVER_IP6"], V["DOMAIN"], "firefox"), auto_order, spare_order)
     if P:
         add(awg("⚡ AWG Амстердам", V["SERVER_IP"]), awg_order)
-        if V.get("EXIT2_HOST"): add(awg("⚡ AWG Запасной", V["EXIT2_HOST"]), awg_order)
+        if V.get("EXIT2_HOST"): add(awg("⚡ AWG Амстердам-2", V["EXIT2_HOST"]), awg_order)
         # no AWG over IPv6: UDP to the exit's IPv6 does not pass from Russian networks in tests
 
+    AUTO, FAST, SPARE = "⚡ Авто", "🚀 Макс. скорость", "🛟 Резерв"
+    probe = {"url": PROBE, "interval": 120, "timeout": 3000, "lazy": False}
+    # Three choices and nothing else on the Proxy screen. Each one is a fallback chain, so no pick is
+    # a dead end: Макс. скорость ends in Авто because UDP to the exit is filtered on some networks,
+    # and Резерв drops the Moscow entry for when that entry is the thing that broke.
     groups = [
-        {"name": f"🔐 {brand}", "type": "select",
-         "proxies": ["⚡ Авто (Россия → Амстердам)"] + (["⚡ AWG (дом, макс. скорость)"] if awg_order else []) + main_order + tcp_order + v6_order + ["DIRECT"]},
-        {"name": "⚡ Авто (Россия → Амстердам)", "type": "fallback", "proxies": main_order + tcp_order + v6_order,
-         "url": PROBE, "interval": 120, "timeout": 3000, "lazy": False},
-        {"name": "🇷🇺 Сайты РФ", "type": "select", "proxies": ["DIRECT", f"🔐 {brand}"]},
+        {"name": f"🔐 {brand}", "type": "select", "proxies": [AUTO] + ([FAST] if awg_order else []) + [SPARE]},
+        {"name": AUTO, "type": "fallback", "proxies": auto_order, **probe},
+        {"name": SPARE, "type": "fallback", "proxies": spare_order, **probe},
     ]
     if awg_order:
-        # fallback, not url-test, with the xray group last: UDP to the exit is filtered on some mobile
-        # and office networks, and a url-test group of AWG alone black-holes every request there
-        groups.insert(2, {"name": "⚡ AWG (дом, макс. скорость)", "type": "fallback",
-                          "proxies": awg_order + ["⚡ Авто (Россия → Амстердам)"],
-                          "url": PROBE, "interval": 120, "timeout": 3000, "lazy": False})
+        groups.insert(2, {"name": FAST, "type": "fallback", "proxies": awg_order + [AUTO], **probe})
 
     cfg = {
         "mixed-port": 7890, "allow-lan": False, "mode": "rule", "log-level": "warning", "ipv6": True,
@@ -130,7 +132,7 @@ def main():
             "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve", "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve", "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
             "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve", "IP-CIDR,100.64.0.0/10,DIRECT,no-resolve", "IP-CIDR6,fc00::/7,DIRECT,no-resolve", "IP-CIDR6,fe80::/10,DIRECT,no-resolve",
         ] + [f"DOMAIN-SUFFIX,{d},🔐 {brand}" for d in FORCE_PROXY] + [
-            "GEOIP,RU,🇷🇺 Сайты РФ", f"MATCH,🔐 {brand}",
+            "GEOIP,RU,DIRECT", f"MATCH,🔐 {brand}",
         ],
     }
     OUT.mkdir(parents=True, exist_ok=True)
