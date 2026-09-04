@@ -1,5 +1,5 @@
 {
-  "log": { "loglevel": "warning" },
+  "log": { "loglevel": "info", "dnsLog": true },
   "dns": { "servers": [ "1.1.1.1", "8.8.8.8", "localhost" ] },
   "inbounds": [
     {

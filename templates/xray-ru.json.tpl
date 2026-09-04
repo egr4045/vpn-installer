@@ -1,5 +1,5 @@
 {
-  "log": { "loglevel": "warning" },
+  "log": { "loglevel": "info", "dnsLog": true },
   "inbounds": [
     {
       "tag": "xhttp-reality",

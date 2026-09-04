@@ -65,12 +65,16 @@ if [ -n "${RU_HOST:-}" ]; then
   export RU_SNI=${RU_SNI:-yandex.ru}
   envsubst < "$TPL/xray-ru.json.tpl" > "$t1"
   if [ -n "${EXIT2_HOST:-}" ]; then
-    # balancer: this exit while it is healthy, standby exit otherwise (observatory probes every 20s)
+    # balancer: this exit while it is healthy, standby exit otherwise (observatory probes every 20s).
+    # The standby tag must not start with the primary's: a balancer selector is a PREFIX match, so
+    # selector ["to-exit"] used to pull in "to-exit2" as well — both exits ended up in the pool,
+    # leastPing spread one browsing session across two public IPs, and fallbackTag never fired
+    # because the pool was never empty.
     jq --arg h "$EXIT2_HOST" --arg sni "$EXIT2_DOMAIN" '
       (.outbounds[] | select(.tag=="to-exit")) as $o |
-      .outbounds += [ $o | .tag="to-exit2" | .settings.vnext[0].address=$h | .streamSettings.realitySettings.serverName=$sni ] |
-      .observatory = {subjectSelector:["to-exit","to-exit2"], probeUrl:"https://www.gstatic.com/generate_204", probeInterval:"20s", enableConcurrency:true} |
-      .routing.balancers = [{tag:"exits", selector:["to-exit"], fallbackTag:"to-exit2", strategy:{type:"leastPing"}}] |
+      .outbounds += [ $o | .tag="standby-exit" | .settings.vnext[0].address=$h | .streamSettings.realitySettings.serverName=$sni ] |
+      .observatory = {subjectSelector:["to-exit","standby-exit"], probeUrl:"https://www.gstatic.com/generate_204", probeInterval:"20s", enableConcurrency:true} |
+      .routing.balancers = [{tag:"exits", selector:["to-exit"], fallbackTag:"standby-exit", strategy:{type:"leastPing"}}] |
       .routing.rules |= map(if .outboundTag=="to-exit" then del(.outboundTag) | .balancerTag="exits" else . end)' "$t1" > "$t2" && mv "$t2" "$t1"
   fi
   inject_users "$t1" "$t2" ""
