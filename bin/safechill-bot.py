@@ -97,6 +97,12 @@ def copy(text, s): return {"text": text, "copy_text": {"text": s}}
 def clip(text, n=4000):  # never cut inside a tag
     return text if len(text) <= n else re.sub(r"<[^>]*$", "", text[:n - 1]) + "…"
 
+def cap_clip(text):
+    """Captions are limited to 1024 units of visible text; slicing the HTML instead would cut a tag in half
+    and Telegram answers 'Can't find end tag'. Content is built to fit, so this only guards the odd case."""
+    if vis(text) <= 1024: return text
+    return TAG_RE.sub("", text)[:1020] + "…"
+
 def send(chat, text, kb=None, silent=False):
     p = {"chat_id": chat, "text": clip(text), "parse_mode": "HTML", "disable_web_page_preview": True, "disable_notification": silent}
     if kb: p["reply_markup"] = {"inline_keyboard": kb}
@@ -120,7 +126,7 @@ def toast(cid, text="", alert=False):
     except Exception: pass
 
 def send_photo(chat, path, caption, kb=None):
-    f = {"chat_id": str(chat), "caption": caption[:1024], "parse_mode": "HTML"}
+    f = {"chat_id": str(chat), "caption": cap_clip(caption), "parse_mode": "HTML"}
     if kb: f["reply_markup"] = json.dumps({"inline_keyboard": kb})
     p = pathlib.Path(path)
     return api_multipart("sendPhoto", f, {"photo": (p.name, p.read_bytes(), "image/png")})["result"]["message_id"]
@@ -129,12 +135,12 @@ def edit_photo(chat, mid, path, caption, kb=None):
     """Replace the photo, caption and buttons of an existing card — one message morphs between profiles."""
     p = pathlib.Path(path)
     f = {"chat_id": str(chat), "message_id": str(mid),
-         "media": json.dumps({"type": "photo", "media": "attach://photo", "caption": caption[:1024], "parse_mode": "HTML"})}
+         "media": json.dumps({"type": "photo", "media": "attach://photo", "caption": cap_clip(caption), "parse_mode": "HTML"})}
     if kb: f["reply_markup"] = json.dumps({"inline_keyboard": kb})
     return api_multipart("editMessageMedia", f, {"photo": (p.name, p.read_bytes(), "image/png")})
 
 def send_doc(chat, blob, fname, caption):
-    return api_multipart("sendDocument", {"chat_id": str(chat), "caption": caption[:1024], "parse_mode": "HTML"},
+    return api_multipart("sendDocument", {"chat_id": str(chat), "caption": cap_clip(caption), "parse_mode": "HTML"},
                          {"document": (fname, blob, "application/octet-stream")})
 
 # ── data ──────────────────────────────────────────────────────────────────────
