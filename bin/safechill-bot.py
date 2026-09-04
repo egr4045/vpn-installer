@@ -15,9 +15,15 @@ Admins only (TG_ADMIN_IDS in /etc/safechill/vpn.env); anyone else gets a toast, 
 Commands: /users (the only advertised one). Hidden: /add /del /qr /status /newip /dropip /help
 CLI:      safechill-bot.py --card <name> <chat_id> [clash|ru|nl|awg|x2]   safechill-bot.py --status <chat_id>
 """
-import json, re, subprocess, sys, time, urllib.request, urllib.error, uuid, html, pathlib
+import json, re, socket, subprocess, sys, time, urllib.request, urllib.error, uuid, html, pathlib
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+# api.telegram.org resolves to IPv6 first and this host's IPv6 path to it stalls on roughly one request in
+# five — a stalled long poll leaves the bot blind to taps until the socket times out, which is what made it
+# feel frozen for minutes. This process only talks to Telegram and GitHub, so pin it to IPv4 wholesale.
+_getaddrinfo = socket.getaddrinfo
+socket.getaddrinfo = lambda host, port, family=0, *a, **kw: _getaddrinfo(host, port, socket.AF_INET, *a, **kw)
 
 ETC = pathlib.Path("/etc/safechill"); CLIENTS = pathlib.Path("/root/clients")
 STATE = pathlib.Path("/var/lib/safechill"); STATE.mkdir(parents=True, exist_ok=True)
@@ -77,9 +83,12 @@ def vis(text):  # Telegram counts UTF-16 units, so an emoji costs 2 — measure 
     return len(TAG_RE.sub("", html.unescape(text)).encode("utf-16-le")) // 2
 
 # ── Telegram API ──────────────────────────────────────────────────────────────
-def api(method, **params):
+POLL = 25          # long-poll seconds: the shorter it is, the smaller the blind window if a socket dies
+SOCK = POLL + 15
+
+def api(method, _timeout=25, **params):
     req = urllib.request.Request(API + method, data=json.dumps(params).encode(), headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=70) as r: return json.load(r)
+    with urllib.request.urlopen(req, timeout=_timeout) as r: return json.load(r)
 
 def api_multipart(method, fields, files):
     boundary = uuid.uuid4().hex; body = b""
@@ -125,19 +134,44 @@ def toast(cid, text="", alert=False):
     try: api("answerCallbackQuery", callback_query_id=cid, text=text, show_alert=alert)
     except Exception: pass
 
+# QR images never change unless a key is reissued, and Telegram hands back a file_id for anything uploaded
+# once. Re-using it turns every later card into a plain JSON call instead of an upload.
+PHOTOS = STATE / "photo_ids.json"
+def _photo_key(p): s = p.stat(); return f"{p}:{s.st_mtime_ns}:{s.st_size}"
+def _photo_ids():
+    try: return json.loads(PHOTOS.read_text(encoding="utf-8"))
+    except Exception: return {}
+def _photo_remember(p, result):
+    sizes = (result.get("result") or {}).get("photo") or []
+    if not sizes: return
+    ids = _photo_ids(); ids[_photo_key(p)] = sizes[-1]["file_id"]
+    try: PHOTOS.write_text(json.dumps(ids), encoding="utf-8")
+    except Exception: pass
+
 def send_photo(chat, path, caption, kb=None):
-    f = {"chat_id": str(chat), "caption": cap_clip(caption), "parse_mode": "HTML"}
-    if kb: f["reply_markup"] = json.dumps({"inline_keyboard": kb})
-    p = pathlib.Path(path)
-    return api_multipart("sendPhoto", f, {"photo": (p.name, p.read_bytes(), "image/png")})["result"]["message_id"]
+    p = pathlib.Path(path); cap = cap_clip(caption); markup = {"inline_keyboard": kb} if kb else None
+    fid = _photo_ids().get(_photo_key(p))
+    if fid:
+        try: return api("sendPhoto", chat_id=chat, photo=fid, caption=cap, parse_mode="HTML", reply_markup=markup)["result"]["message_id"]
+        except urllib.error.HTTPError: pass          # file_id went stale — fall through and upload again
+    f = {"chat_id": str(chat), "caption": cap, "parse_mode": "HTML"}
+    if kb: f["reply_markup"] = json.dumps(markup)
+    r = api_multipart("sendPhoto", f, {"photo": (p.name, p.read_bytes(), "image/png")})
+    _photo_remember(p, r); return r["result"]["message_id"]
 
 def edit_photo(chat, mid, path, caption, kb=None):
     """Replace the photo, caption and buttons of an existing card — one message morphs between profiles."""
-    p = pathlib.Path(path)
+    p = pathlib.Path(path); cap = cap_clip(caption); markup = {"inline_keyboard": kb} if kb else None
+    fid = _photo_ids().get(_photo_key(p))
+    if fid:
+        try: return api("editMessageMedia", chat_id=chat, message_id=mid, reply_markup=markup,
+                        media={"type": "photo", "media": fid, "caption": cap, "parse_mode": "HTML"})
+        except urllib.error.HTTPError: pass
     f = {"chat_id": str(chat), "message_id": str(mid),
-         "media": json.dumps({"type": "photo", "media": "attach://photo", "caption": cap_clip(caption), "parse_mode": "HTML"})}
-    if kb: f["reply_markup"] = json.dumps({"inline_keyboard": kb})
-    return api_multipart("editMessageMedia", f, {"photo": (p.name, p.read_bytes(), "image/png")})
+         "media": json.dumps({"type": "photo", "media": "attach://photo", "caption": cap, "parse_mode": "HTML"})}
+    if kb: f["reply_markup"] = json.dumps(markup)
+    r = api_multipart("editMessageMedia", f, {"photo": (p.name, p.read_bytes(), "image/png")})
+    _photo_remember(p, r); return r
 
 def send_doc(chat, blob, fname, caption):
     return api_multipart("sendDocument", {"chat_id": str(chat), "caption": cap_clip(caption), "parse_mode": "HTML"},
@@ -432,9 +466,10 @@ def on_callback(cq):
     is_photo = bool(m.get("photo"))
     try:
         if kind == "u":                                   # person tapped in the list → the list becomes the card
-            toast(cid, "Готовлю…")
+            toast(cid, "Открываю…")
             if is_photo: card(chat, rest, None, mid)
-            else: drop(chat, mid); card(chat, rest)
+            else:                                         # the list stays on screen as a visible "wait" while the card loads
+                edit(chat, mid, f"⏳ Открываю {esc(rest)}…"); card(chat, rest); drop(chat, mid)
         elif kind == "k":                                 # another profile → the same card morphs
             name, _, v = rest.partition(":"); toast(cid, "Готовлю…"); card(chat, name, v, mid if is_photo else None)
         elif kind == "home":
@@ -470,14 +505,20 @@ def main():
     log("bot started, admins", ADMINS)
     while True:
         try:
-            res = api("getUpdates", offset=offset, timeout=50, allowed_updates=["message", "callback_query"])
-            for upd in res.get("result", []):
-                offset = upd["update_id"] + 1; off_file.write_text(str(offset))
+            res = api("getUpdates", _timeout=SOCK, offset=offset, timeout=POLL, allowed_updates=["message", "callback_query"])
+        except KeyboardInterrupt: return
+        except urllib.error.HTTPError as e:
+            log("poll http", e.code); time.sleep(2 if e.code == 409 else 5); continue
+        except (TimeoutError, urllib.error.URLError, OSError) as e:
+            log("poll retry:", e); continue          # a stalled poll socket is routine — re-poll at once
+        for upd in res.get("result", []):
+            offset = upd["update_id"] + 1; off_file.write_text(str(offset))
+            try:
                 if "message" in upd: on_message(upd["message"])
                 elif "callback_query" in upd: on_callback(upd["callback_query"])
-        except KeyboardInterrupt: return
-        except Exception as e:  # noqa: BLE001
-            log("loop error:", e); time.sleep(5)
+            except KeyboardInterrupt: return
+            except Exception as e:  # noqa: BLE001  — one bad update must not stop the bot
+                log("handler error:", repr(e))
 
 if __name__ == "__main__":
     main()
