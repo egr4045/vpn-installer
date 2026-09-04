@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """clash-sub.py <name> — a complete mihomo (Clash Meta) profile for one person: every xray server
 (XHTTP+REALITY and TCP fallbacks on all nodes, IPv4 and IPv6), AmneziaWG 3.1 on both exits, an
-auto group that prefers the RU entry and falls back to Amsterdam, Russian sites direct, DNS over HTTPS.
+auto group that prefers the RU entry and falls back to Amsterdam, Russian sites direct except the services
+whose CDN lives inside Russian ISPs (FORCE_PROXY below), DNS over HTTPS.
 Works in ClashMi, Clash Verge Rev, FlClash, Clash Meta for Android (mihomo >= 1.19.30 for AWG 3.1).
 
 Served by nginx as https://DOMAIN/c/<token> (behind the REALITY steal on :443).
@@ -15,6 +16,22 @@ except ImportError:  # JSON is valid YAML; mihomo reads it fine
 
 ETC = pathlib.Path("/etc/safechill"); CL = pathlib.Path("/root/clients"); OUT = pathlib.Path("/var/www/html/c")
 PROBE = "https://www.gstatic.com/generate_204"
+
+# Services whose CDN answers with caches inside Russian ISPs, which are exactly the throttled or blocked
+# path: measured from Moscow, www.tiktok.com -> 164.215.74.x (AS29076 RU), tiktokcdn/ttwstatic ->
+# 93.191.15.x (AS51369 RU), googlevideo -> the provider's own GGC. A bare GEOIP,RU rule therefore sends
+# them DIRECT and the app hangs half-loaded, so they are matched by domain before GEOIP ever runs.
+FORCE_PROXY = [
+    "tiktok.com", "tiktokv.com", "tiktokv.us", "tiktokcdn.com", "tiktokcdn-us.com", "tiktokcdn-eu.com",
+    "tiktokcdn-in.com", "ttwstatic.com", "ttlivecdn.com", "byteoversea.com", "ibytedtos.com", "byteimg.com",
+    "bytedapm.com", "isnssdk.com", "snssdk.com", "muscdn.com", "musical.ly", "capcut.com",
+    "youtube.com", "youtu.be", "googlevideo.com", "ytimg.com", "ggpht.com", "youtubei.googleapis.com",
+    "instagram.com", "cdninstagram.com", "facebook.com", "fbcdn.net", "whatsapp.com", "whatsapp.net",
+    "twitter.com", "x.com", "twimg.com", "t.co",
+    "discord.com", "discord.gg", "discord.media", "discordapp.com", "discordapp.net",
+    "openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com", "claude.ai", "anthropic.com",
+    "linkedin.com", "medium.com", "signal.org", "spotify.com", "scdn.co", "soundcloud.com",
+]
 
 def load_env(p):
     env = {}
@@ -33,6 +50,7 @@ def main():
     P = load_env(ETC / "peers" / f"{name}.env") if (ETC / "peers" / f"{name}.env").exists() else {}
     brand = V.get("BRAND", "SafeChill"); tcp_port = int(V.get("TCP_PORT", "8443")); awg_port = int(V.get("AWG_PORT", "39217"))
     fallback_sni = V.get("FALLBACK_SNI", "gateway.icloud.com"); net4 = V.get("AWG_NET4", "10.8.0")
+    apex = ".".join(V["DOMAIN"].split(".")[-2:])
     xmux = {"max-concurrency": "16-32", "max-connections": "0", "c-max-reuse-times": "64-128",
             "h-max-request-times": "800-900", "h-max-reusable-secs": "1800-3000"}
 
@@ -62,14 +80,16 @@ def main():
                                       "rekey-after-time": rng("AWG_RAT", "100-140"), "keepalive-timeout": rng("AWG_KT", "8-12"),
                                       "random-trailers": True}}
 
-    proxies, main_order, tcp_order, awg_order = [], [], [], []
+    proxies, main_order, tcp_order, awg_order, v6_order = [], [], [], [], []
     def add(p, bucket): proxies.append(p); bucket.append(p["name"])
+    # IPv4 first everywhere: desktop ClashMi ships with ipv6 off, so the v6 entries only cost a probe
     if V.get("RU_HOST"):
         add(xhttp("🇷🇺 Россия → Амстердам", V["RU_HOST"], V.get("RU_SNI", "yandex.ru"), "chrome"), main_order)
-        if V.get("RU_HOST6"): add(xhttp("🇷🇺 Россия → Амстердам (IPv6)", V["RU_HOST6"], V.get("RU_SNI", "yandex.ru"), "chrome"), main_order)
     add(xhttp("🟢 Амстердам", V["SERVER_IP"], V["DOMAIN"], "firefox"), main_order)
-    if V.get("SERVER_IP6"): add(xhttp("🟢 Амстердам (IPv6)", V["SERVER_IP6"], V["DOMAIN"], "firefox"), main_order)
     if V.get("EXIT2_HOST"): add(xhttp("🛟 Запасной выход", V["EXIT2_HOST"], V["EXIT2_DOMAIN"], "firefox"), main_order)
+    if V.get("RU_HOST") and V.get("RU_HOST6"):
+        add(xhttp("🇷🇺 Россия → Амстердам (IPv6)", V["RU_HOST6"], V.get("RU_SNI", "yandex.ru"), "chrome"), v6_order)
+    if V.get("SERVER_IP6"): add(xhttp("🟢 Амстердам (IPv6)", V["SERVER_IP6"], V["DOMAIN"], "firefox"), v6_order)
     if V.get("RU_HOST"): add(tcp("🇷🇺 Россия TCP", V["RU_HOST"], V.get("RU_SNI", "yandex.ru"), "chrome"), tcp_order)
     add(tcp("🟢 Амстердам TCP", V["SERVER_IP"], fallback_sni, "chrome"), tcp_order)
     if V.get("EXIT2_HOST"): add(tcp("🛟 Запасной TCP", V["EXIT2_HOST"], fallback_sni, "chrome"), tcp_order)
@@ -80,14 +100,17 @@ def main():
 
     groups = [
         {"name": f"🔐 {brand}", "type": "select",
-         "proxies": ["⚡ Авто (Россия → Амстердам)"] + (["⚡ AWG (дом, макс. скорость)"] if awg_order else []) + main_order + tcp_order + ["DIRECT"]},
-        {"name": "⚡ Авто (Россия → Амстердам)", "type": "fallback", "proxies": main_order + tcp_order,
+         "proxies": ["⚡ Авто (Россия → Амстердам)"] + (["⚡ AWG (дом, макс. скорость)"] if awg_order else []) + main_order + tcp_order + v6_order + ["DIRECT"]},
+        {"name": "⚡ Авто (Россия → Амстердам)", "type": "fallback", "proxies": main_order + tcp_order + v6_order,
          "url": PROBE, "interval": 120, "timeout": 3000, "lazy": False},
         {"name": "🇷🇺 Сайты РФ", "type": "select", "proxies": ["DIRECT", f"🔐 {brand}"]},
     ]
     if awg_order:
-        groups.insert(2, {"name": "⚡ AWG (дом, макс. скорость)", "type": "url-test", "proxies": awg_order,
-                          "url": PROBE, "interval": 300, "tolerance": 80})
+        # fallback, not url-test, with the xray group last: UDP to the exit is filtered on some mobile
+        # and office networks, and a url-test group of AWG alone black-holes every request there
+        groups.insert(2, {"name": "⚡ AWG (дом, макс. скорость)", "type": "fallback",
+                          "proxies": awg_order + ["⚡ Авто (Россия → Амстердам)"],
+                          "url": PROBE, "interval": 120, "timeout": 3000, "lazy": False})
 
     cfg = {
         "mixed-port": 7890, "allow-lan": False, "mode": "rule", "log-level": "warning", "ipv6": True,
@@ -102,8 +125,11 @@ def main():
                 "proxy-server-nameserver": ["https://1.1.1.1/dns-query", "https://dns.google/dns-query"]},
         "proxies": proxies, "proxy-groups": groups,
         "rules": [
+            # our own domain direct, so the profile can always be refreshed even when every tunnel is down
+            f"DOMAIN-SUFFIX,{apex},DIRECT",
             "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve", "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve", "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
             "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve", "IP-CIDR,100.64.0.0/10,DIRECT,no-resolve", "IP-CIDR6,fc00::/7,DIRECT,no-resolve", "IP-CIDR6,fe80::/10,DIRECT,no-resolve",
+        ] + [f"DOMAIN-SUFFIX,{d},🔐 {brand}" for d in FORCE_PROXY] + [
             "GEOIP,RU,🇷🇺 Сайты РФ", f"MATCH,🔐 {brand}",
         ],
     }
