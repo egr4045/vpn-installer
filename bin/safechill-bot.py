@@ -250,11 +250,12 @@ def card_content(name, v):
     else:
         head = (f"🔑 <b>{BRAND}</b> · {esc(name)}{ROUTE.get(v, '')}\n\n"
                 f"1. Поставь Amnezia — кнопки ниже\n"
-                f"2. «+» → «Подключиться по ключу»\n3. Тап по ключу → вставь → включи")
-        if vis(head) + vis(body) + 2 <= 1024:   # the key must fit beside the steps, otherwise it goes into a file
-            cap, attach = f"{head}\n\n<code>{esc(body)}</code>", None
-        else:
-            cap, attach = f"{head}\n\nКлюч в файле ниже.", body
+                f"2. «+» → «Подключиться по ключу»")
+        inline = f"{head}\n3. Тап по ключу → вставь → включи"
+        if vis(inline) + vis(body) + 2 <= 1024:   # the key rides in the caption if it fits beside the steps…
+            cap, attach = f"{inline}\n\n<code>{esc(body)}</code>", None
+        else:                                     # …otherwise step 3 has to point at the file instead (AmneziaWG
+            cap, attach = f"{head}\n3. Открой файл ниже → включи", body   # keys are ~1320 chars and never fit)
         rows = [DL["amnezia"]]
     return d / f"{FILES[v]}.png", cap, rows, attach
 
