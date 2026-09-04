@@ -129,6 +129,11 @@ def main():
         "rules": [
             # our own domain direct, so the profile can always be refreshed even when every tunnel is down
             f"DOMAIN-SUFFIX,{apex},DIRECT",
+        ] + [f"IP-CIDR{'6' if ':' in h else ''},{h}/{128 if ':' in h else 32},DIRECT,no-resolve"
+             # anything else aimed at a node itself — ssh, the subscription, a health probe — would
+             # otherwise hairpin: into the tunnel, out at the exit, back across Europe to that node
+             for h in dict.fromkeys(filter(None, [V.get("SERVER_IP"), V.get("SERVER_IP6"), V.get("EXIT2_HOST"),
+                                                  V.get("RU_HOST"), V.get("RU_HOST6")]))] + [
             "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve", "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve", "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
             "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve", "IP-CIDR,100.64.0.0/10,DIRECT,no-resolve", "IP-CIDR6,fc00::/7,DIRECT,no-resolve", "IP-CIDR6,fe80::/10,DIRECT,no-resolve",
         ] + [f"DOMAIN-SUFFIX,{d},🔐 {brand}" for d in FORCE_PROXY] + [
