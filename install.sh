@@ -93,6 +93,9 @@ fi
 # -- 3. kernel tuning ----------------------------------------------------------
 say "Kernel tuning (BBR, buffers, forwarding)"
 install -m644 "$REPO/templates/sysctl-99-vpn.conf" /etc/sysctl.d/99-vpn.conf
+install -d /etc/systemd/journald.conf.d
+install -m644 "$REPO/templates/journald-99-safechill.conf" /etc/systemd/journald.conf.d/99-safechill.conf
+systemctl restart systemd-journald
 sysctl --system >/dev/null
 ok "sysctl applied"
 
