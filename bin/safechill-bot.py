@@ -16,7 +16,9 @@ Texts are as terse as the alerts in vpn-health.sh: what to do, nothing said twic
 cannot act on. The steps lead with copying rather than the QR — a phone cannot scan the QR on its own
 screen, and that is how the card is usually read; the QR is for a second screen.
 Vocabulary shared with the health scripts: 🇳🇱 Амстердам · 🇷🇺 Москва · 🛟 Запасной; 🔴🟠🟡🟢🔵.
-Admins only (TG_ADMIN_IDS in /etc/safechill/vpn.env); anyone else gets a toast, not a chat message.
+Admins only (TG_ADMIN_IDS in /etc/safechill/vpn.env); anyone else gets a toast, not a chat message, and
+their id lands in the journal — which is where the id for a new TG_ADMIN_IDS entry comes from, since the
+Bot API will not list the members of a group.
 
 Commands: /users (the only advertised one). Hidden: /add /del /qr /status /newip /dropip /help
 CLI:      safechill-bot.py --card <name> <chat_id> [clash|ru|nl|awg|x2]   safechill-bot.py --status <chat_id>
@@ -441,12 +443,22 @@ def do_recheck(chat, mid):
     status(chat, mid)
 
 # ── dispatch ──────────────────────────────────────────────────────────────────
+def whois(u):
+    """Who wrote, for the journal — `journalctl -u safechill-bot | grep "не админ"` gives the id to add."""
+    name = " ".join(x for x in (u.get("first_name"), u.get("last_name")) if x)
+    return f"id={u.get('id')} {name}".strip() + (f" @{u['username']}" if u.get("username") else "")
+
 def on_message(msg):
-    chat = msg["chat"]["id"]; frm = (msg.get("from") or {}).get("id"); text = (msg.get("text") or "").strip()
+    chat = msg["chat"]["id"]; who = msg.get("from") or {}; frm = who.get("id"); text = (msg.get("text") or "").strip()
     if not text: return
     if frm not in ADMINS:
+        log("не админ:", whois(who), "| чат", chat)
         if text.startswith("/"): send(chat, "⛔ Бот только для администратора.")
         return
+    fwd = (msg.get("forward_origin") or {}).get("sender_user") or msg.get("forward_from")
+    if fwd: log("переслано от:", whois(fwd))     # forwarding someone's message names them too, if they allow it
+    elif (msg.get("forward_origin") or {}).get("sender_user_name"):
+        log("переслано от скрытого:", msg["forward_origin"]["sender_user_name"])
     if not ENV.get("TG_CHAT_ID") and not (ETC / "tg_chat_id").exists():   # bind alerts to the first chat an admin uses
         (ETC / "tg_chat_id").write_text(str(chat), encoding="utf-8"); log("alerts bound to chat", chat)
     if not text.startswith("/"):
@@ -481,7 +493,8 @@ def on_message(msg):
 def on_callback(cq):
     cid = cq["id"]; m = cq.get("message") or {}; chat = m.get("chat", {}).get("id"); mid = m.get("message_id")
     frm = (cq.get("from") or {}).get("id"); data = cq.get("data", "")
-    if frm not in ADMINS or chat is None: return toast(cid, "Только для администратора")
+    if frm not in ADMINS or chat is None:
+        log("не админ (кнопка):", whois(cq.get("from") or {})); return toast(cid, "Только для администратора")
     log("cb", data, "from", frm)
     kind, _, rest = data.partition(":")
     toast(cid)                          # the button's own spinner is the feedback; a toast saying "wait" is noise
