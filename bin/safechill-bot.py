@@ -194,10 +194,10 @@ PROFILES = ["clash", "ru", "nl", "awg", "x2"]        # order = what people shoul
 FILES = {"clash": "clash", "ru": "amnezia-ru", "nl": "amnezia", "awg": "amnezia-awg", "x2": "amnezia-x2"}
 BTNS = {"clash": "🧩 ClashMi", "ru": "🔑 Amnezia · Россия", "nl": "🔑 Amnezia · Амстердам",
         "awg": "⚡ AmneziaWG", "x2": "🛟 Amnezia · запасной"}
-LINE2 = {"ru":  "вход через Россию, выход в Амстердаме.",
-         "nl":  "Амстердам напрямую.",
-         "awg": "AmneziaWG, Амстердам. Быстрее дома и на ПК, на мобильном бывает капризным.",
-         "x2":  "запасной выход напрямую."}
+LINE2 = {"ru":  "AmneziaVPN · через Россию, выход в Амстердаме.",   # every character here is one the ~860-char
+         "nl":  "AmneziaVPN · Амстердам напрямую.",                 # key needs to stay inside the 1024 caption
+         "awg": "AmneziaWG · быстро дома, на мобильном не всегда.",
+         "x2":  "AmneziaVPN · запасной выход напрямую."}
 DL = {"clash": [url("📲 iPhone", CLASHMI_IOS), url("🤖 Android · 💻 ПК", CLASHMI_ALL), url("🌐 Сайт", CLASHMI_SITE)],
       "amnezia": [url("📲 iPhone", AMNEZIA_IOS), url("🤖 Android", AMNEZIA_ANDROID), url("💻 Windows / Mac", AMNEZIA_LATEST)]}
 
@@ -215,7 +215,7 @@ def card_content(name, v):
         rows = [DL["clash"], [copy("📋 Скопировать ссылку", body)]]
         attach = None
     else:
-        head = (f"🔑 <b>{BRAND}</b> · {esc(name)}\nAmneziaVPN · {LINE2[v]}\n\n"
+        head = (f"🔑 <b>{BRAND}</b> · {esc(name)}\n{LINE2[v]}\n\n"
                 f"1. Поставь AmneziaVPN — кнопки ниже\n"
                 f"2. «+» → «Подключиться по ключу» → QR\n3. Включи. Готово.")
         if vis(head) + vis(body) + 2 <= 1024:   # the key must fit beside the steps, otherwise it goes into a file
