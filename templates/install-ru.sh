@@ -5,7 +5,10 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 TCP_PORT=${TCP_PORT:-8443}
 apt-get update -qq
-apt-get install -y -qq ufw curl jq openssl >/dev/null
+apt-get install -y -qq ufw fail2ban curl jq openssl >/dev/null
+# stopped until the exit node pushes jail.d/safechill.local: the distro default enables the sshd jail
+# with no ignoreip, and the nodes ssh to each other to render and to restart a stuck xray
+systemctl stop fail2ban 2>/dev/null || true; systemctl disable fail2ban 2>/dev/null || true
 command -v xray >/dev/null || bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install >/tmp/xray-install.log 2>&1
 printf 'net.core.default_qdisc = fq\nnet.ipv4.tcp_congestion_control = bbr\nnet.ipv4.tcp_fastopen = 3\nnet.core.rmem_max = 16777216\nnet.core.wmem_max = 16777216\n' > /etc/sysctl.d/99-vpn.conf
 sysctl --system >/dev/null
