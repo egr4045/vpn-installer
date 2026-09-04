@@ -26,6 +26,12 @@ server {
         add_header Cache-Control "no-store";
         try_files $uri =404;
     }
+    # personal ClashMi restore archives: /z/<token>.zip = subscription plus the desktop settings
+    location /z/ {
+        default_type application/zip;
+        add_header Cache-Control "no-store";
+        try_files $uri =404;
+    }
     # personal subscriptions: /s/<token> = base64 list of this person's xray servers
     location /s/ {
         default_type text/plain;
