@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """safechill-bot — Telegram admin bot for the exit node (stdlib only, long polling).
 
-One command, one live message. /users (also /start) opens the home screen: people as buttons, health
-summary in its first line, who is online, plus "Добавить" and "Подробно". Tapping a person replaces the
-home message with a single card — photo (QR) whose caption carries the steps and the key/link itself,
-download buttons, and buttons for the other profiles; switching a profile edits that same message in
-place (editMessageMedia), so nothing piles up in the chat. "← Люди" brings the home screen back.
+Two kinds of message, kept apart on purpose:
+  · one LIVE text message holds all the navigation and is only ever edited — /users (also /start) shows
+    the health line with people as buttons; tapping a person turns it into that person's screen (their
+    profiles, delete, back), "📊 Подробно" into the health screen. Nothing piles up.
+  · the CARD is an artifact meant to be forwarded to that person: photo (QR), the steps and the key or
+    link in its caption, and only client-side buttons — app downloads and "copy the link". It carries no
+    callback buttons at all, since those are what a forward strips, so a forwarded copy stays complete.
+    One card lives in the chat at a time: asking for another replaces it.
 
 Default profile is ClashMi (one subscription: every server, auto-switching Россия → Амстердам →
 запасной, Russian sites direct); AmneziaVPN keys are the alternatives. Money is never shown.
+Texts are as terse as the alerts in vpn-health.sh: what to do, nothing said twice, nothing the reader
+cannot act on. The steps lead with copying rather than the QR — a phone cannot scan the QR on its own
+screen, and that is how the card is usually read; the QR is for a second screen.
 Vocabulary shared with the health scripts: 🇳🇱 Амстердам · 🇷🇺 Москва · 🛟 Запасной; 🔴🟠🟡🟢🔵.
 Admins only (TG_ADMIN_IDS in /etc/safechill/vpn.env); anyone else gets a toast, not a chat message.
 
@@ -159,20 +165,6 @@ def send_photo(chat, path, caption, kb=None):
     r = api_multipart("sendPhoto", f, {"photo": (p.name, p.read_bytes(), "image/png")})
     _photo_remember(p, r); return r["result"]["message_id"]
 
-def edit_photo(chat, mid, path, caption, kb=None):
-    """Replace the photo, caption and buttons of an existing card — one message morphs between profiles."""
-    p = pathlib.Path(path); cap = cap_clip(caption); markup = {"inline_keyboard": kb} if kb else None
-    fid = _photo_ids().get(_photo_key(p))
-    if fid:
-        try: return api("editMessageMedia", chat_id=chat, message_id=mid, reply_markup=markup,
-                        media={"type": "photo", "media": fid, "caption": cap, "parse_mode": "HTML"})
-        except urllib.error.HTTPError: pass
-    f = {"chat_id": str(chat), "message_id": str(mid),
-         "media": json.dumps({"type": "photo", "media": "attach://photo", "caption": cap, "parse_mode": "HTML"})}
-    if kb: f["reply_markup"] = json.dumps(markup)
-    r = api_multipart("editMessageMedia", f, {"photo": (p.name, p.read_bytes(), "image/png")})
-    _photo_remember(p, r); return r
-
 def send_doc(chat, blob, fname, caption):
     return api_multipart("sendDocument", {"chat_id": str(chat), "caption": cap_clip(caption), "parse_mode": "HTML"},
                          {"document": (fname, blob, "application/octet-stream")})
@@ -229,15 +221,13 @@ def health():
     try: return json.loads((STATE / "health.json").read_text(encoding="utf-8"))
     except Exception: return {}
 
-# ── one card per person: photo (QR) + everything needed in its caption ────────
+# ── the card to forward, and the person's screen that produces it ────────────
 PROFILES = ["clash", "ru", "nl", "awg", "x2"]        # order = what people should try first
 FILES = {"clash": "clash", "ru": "amnezia-ru", "nl": "amnezia", "awg": "amnezia-awg", "x2": "amnezia-x2"}
-BTNS = {"clash": "🧩 ClashMi", "ru": "🔑 Amnezia · Россия", "nl": "🔑 Amnezia · Амстердам",
-        "awg": "⚡ AmneziaWG", "x2": "🛟 Amnezia · запасной"}
-LINE2 = {"ru":  "AmneziaVPN · через Россию, выход в Амстердаме.",   # every character here is one the ~860-char
-         "nl":  "AmneziaVPN · Амстердам напрямую.",                 # key needs to stay inside the 1024 caption
-         "awg": "AmneziaWG · быстро дома, на мобильном не всегда.",
-         "x2":  "AmneziaVPN · запасной выход напрямую."}
+BTNS = {"clash": "🧩 ClashMi", "ru": "🔑 Россия", "nl": "🔑 Амстердам",
+        "awg": "⚡ AmneziaWG · дома", "x2": "🛟 Запасной"}
+ROUTE = {"ru": " · Россия → Амстердам", "nl": " · Амстердам",   # a suffix on the header line instead of a line
+         "awg": " · AmneziaWG", "x2": " · Запасной"}            # of its own: the ~860-char key needs the room
 DL = {"clash": [url("📲 iPhone", CLASHMI_IOS), url("🤖 Android · 💻 ПК", CLASHMI_ALL), url("🌐 Сайт", CLASHMI_SITE)],
       "amnezia": [url("📲 iPhone", AMNEZIA_IOS), url("🤖 Android", AMNEZIA_ANDROID), url("💻 Windows / Mac", AMNEZIA_LATEST)]}
 
@@ -245,41 +235,61 @@ def have(name, v): return (CLIENTS / name / f"{FILES[v]}.txt").exists()
 def default_profile(name): return next((v for v in PROFILES if have(name, v)), "clash")
 
 def card_content(name, v):
-    """(png path, caption, keyboard, key-to-attach-or-None) for one profile."""
+    """(png path, caption, keyboard, key-to-attach-or-None) for one profile.
+
+    Only url and copy_text buttons: those are the ones a forward keeps, and this card exists to be
+    forwarded. Navigation and deletion live in the person's screen instead."""
     d = CLIENTS / name; body = (d / f"{FILES[v]}.txt").read_text(encoding="utf-8").strip()
     if v == "clash":
-        cap = (f"🧩 <b>{BRAND}</b> · {esc(name)}\n"
-               f"ClashMi — всё в одном: все серверы, авто-переключение Россия → Амстердам → запасной, российские сайты напрямую.\n\n"
-               f"1. Скачай ClashMi — кнопки ниже\n2. «+» → по ссылке: сканируй QR или вставь ссылку (кнопка ниже копирует)\n"
-               f"3. Группа «⚡ Авто», включи. Готово.\n\n<code>{esc(body)}</code>")
-        rows = [DL["clash"], [copy("📋 Скопировать ссылку", body)]]
+        cap = (f"🧩 <b>{BRAND}</b> · {esc(name)}\n\n"
+               f"1. Поставь ClashMi — кнопки ниже\n"
+               f"2. Скопируй ссылку (кнопка) → в приложении «+» → по ссылке\n"
+               f"3. Группа «⚡ Авто» → включи")
+        rows = [DL["clash"], [copy("📋 Скопировать ссылку", body)]]   # copy_text holds ≤256 chars; a URL fits
         attach = None
     else:
-        head = (f"🔑 <b>{BRAND}</b> · {esc(name)}\n{LINE2[v]}\n\n"
-                f"1. Поставь AmneziaVPN — кнопки ниже\n"
-                f"2. «+» → «Подключиться по ключу» → QR\n3. Включи. Готово.")
+        head = (f"🔑 <b>{BRAND}</b> · {esc(name)}{ROUTE.get(v, '')}\n\n"
+                f"1. Поставь Amnezia — кнопки ниже\n"
+                f"2. «+» → «Подключиться по ключу»\n3. Тап по ключу → вставь → включи")
         if vis(head) + vis(body) + 2 <= 1024:   # the key must fit beside the steps, otherwise it goes into a file
             cap, attach = f"{head}\n\n<code>{esc(body)}</code>", None
         else:
-            cap, attach = f"{head}\n\nКлюч длинный — он в файле следующим сообщением.", body
+            cap, attach = f"{head}\n\nКлюч в файле ниже.", body
         rows = [DL["amnezia"]]
-    alts = [btn(BTNS[p], f"k:{name}:{p}") for p in PROFILES if p != v and have(name, p)]
-    rows += [alts[i:i + 2] for i in range(0, len(alts), 2)]
-    rows.append([btn("🗑 Удалить", f"d:{name}"), btn("← Люди", "home")])
     return d / f"{FILES[v]}.png", cap, rows, attach
 
-def card(chat, name, v=None, mid=None):
-    """Send the card as one message, or morph an existing card into another profile."""
+LAST_CARD = {}   # chat -> [message ids]: one card lives in the chat at a time, the next one replaces it
+
+def card(chat, name, v=None):
+    """Send one card and drop the previous one, so the chat holds exactly the card there is to forward."""
     v = v if (v in PROFILES and have(name, v)) else default_profile(name)
-    if not have(name, v):
-        return send(chat, f"У {esc(name)} нет профилей — запусти add-client.sh {esc(name)} на ноде", [[btn("← Люди", "home")]])
+    if not have(name, v): return None          # no keys yet — the person's screen says so
     png, cap, rows, attach = card_content(name, v)
-    if mid: edit_photo(chat, mid, png, cap, rows)
-    else: mid = send_photo(chat, png, cap, rows)
-    if attach: send_doc(chat, attach.encode(), f"{BRAND}-{name}-{v}.vpn", "Ключ файлом — открой его в AmneziaVPN.")
+    mids = [send_photo(chat, png, cap, rows)]
+    if attach:
+        mids.append(send_doc(chat, attach.encode(), f"{BRAND}-{name}-{v}.vpn", "Открой в AmneziaVPN.")["result"]["message_id"])
+    for old in LAST_CARD.get(chat, []): drop(chat, old)   # after sending, so a failure never loses both
+    LAST_CARD[chat] = mids
+    return mids[0]
+
+def person_view(name, cur=None):
+    ps = [p for p in PROFILES if have(name, p)]
+    L = [f"👤 <b>{esc(name)}</b>" + (" · 🟢 в сети" if name in online_set() else "")]
+    if not ps: L.append(f"Ключей нет — запусти <code>add-client.sh {esc(name)}</code> на ноде")
+    rows = [[btn(("• " if p == cur else "") + BTNS[p], f"k:{name}:{p}") for p in ps[i:i + 2]] for i in range(0, len(ps), 2)]
+    rows += [[btn("🗑 Удалить", f"d:{name}")], [btn("← Люди", "home")]]   # never side by side with «← Люди»
+    return "\n".join(L), rows
+
+def person(chat, mid, name, v=None):
+    """The live message becomes this person's screen; their card goes below it."""
+    v = v if (v in PROFILES and have(name, v)) else default_profile(name)
+    text, kb = person_view(name, v if have(name, v) else None)
+    if mid: edit(chat, mid, text, kb)
+    else: mid = send(chat, text, kb)
+    card(chat, name, v)
     return mid
 
-# ── home screen: people, health and adding, all in one message ───────────────
+# ── the live message: home screen and health screen ──────────────────────────
 SEV = {"xhttp": "🔴", "egress4": "🔴", "cert3": "🔴", "disk95": "🔴",
        "tcp": "🟠", "awg": "🟠", "nginx": "🟠", "mem": "🟠", "ru": "🟠"}   # everything else 🟡
 SITE = {"www.youtube.com": "YouTube", "www.google.com": "Google", "www.instagram.com": "Instagram", "web.telegram.org": "Telegram",
@@ -290,16 +300,15 @@ def health_line(h):
     if not h: return "🟡 Проверок ещё не было"
     c = h.get("checks", {}); bad = [k for k, x in c.items() if not x.get("ok")]
     since = {f["key"]: f["since"] for f in h.get("failing", [])}
-    if not bad: return f"🟢 Всё работает · проверено {hhmm(h['ts'])}"
+    if not bad: return f"🟢 Всё работает · {hhmm(h['ts'])}"
     k = sorted(bad, key=lambda x: ("🔴🟠🟡".index(SEV.get(x, "🟡"))))[0]
     s = since.get(k); rest = f" (+{len(bad) - 1})" if len(bad) > 1 else ""
     return f"{SEV.get(k, '🟡')} {esc(cap1(c[k]['title']))}{rest}" + (f", с {hhmm(s)}" if s else "")
 
 def home_view():
-    us = sorted(users(), key=lambda x: x["name"].lower()); on = online_set(); h = health()
-    L = [f"👥 <b>{BRAND}</b> · {plural(len(us), 'человек', 'человека', 'человек')}", health_line(h)]
-    live = [u["name"] for u in us if u["name"] in on]
-    L.append(f"🟢 В сети: {', '.join(esc(n) for n in live)}" if live else "Сейчас никто не подключён")
+    us = sorted(users(), key=lambda x: x["name"].lower()); on = online_set()
+    L = [health_line(health())]          # the count is the number of buttons, "who is online" is 🟢 on them
+    if not us: L.append("Людей пока нет.")
     rows = [[btn(f"{u['name']}{' 🟢' if u['name'] in on else ''}", f"u:{u['name']}") for u in us[i:i + 2]] for i in range(0, len(us), 2)]
     rows.append([btn("➕ Добавить", "add"), btn("📊 Подробно", "status")])
     return "\n".join(L), rows
@@ -311,27 +320,30 @@ def home(chat, mid=None):
 
 def status_view():
     h = health()
-    if not h: return f"📊 <b>{BRAND}</b>\nПроверок ещё не было — нажми «Проверить сейчас».", [[btn("🔄 Проверить сейчас", "recheck"), btn("← Люди", "home")]]
+    if not h: return "📊 Проверок ещё не было", [[btn("🔄 Проверить сейчас", "recheck"), btn("← Люди", "home")]]
     c = h.get("checks", {}); now = int(time.time())
     def ok(k): return c.get(k, {}).get("ok", True)
     def m(k): return "🟢" if ok(k) else SEV.get(k, "🟡")
     bad = [k for k, v in c.items() if not v.get("ok")]; since = {f["key"]: f["since"] for f in h.get("failing", [])}
-    L = [f"📊 <b>{BRAND}</b> · " + ("всё в порядке" if not bad else plural(len(bad), "проблема", "проблемы", "проблем")),
-         f"Проверено {hhmm(h['ts'])}" + (f" ({ago(now - h['ts'])})" if now - h["ts"] > 150 else "") + f" · инцидентов за сутки: {h.get('incidents_24h', 0)}", ""]
+    inc = h.get("incidents_24h", 0)
+    L = ["📊 " + ("Всё работает" if not bad else plural(len(bad), "проблема", "проблемы", "проблем"))
+         + f" · {hhmm(h['ts'])}" + (f" ({ago(now - h['ts'])})" if now - h["ts"] > 150 else "")
+         + (f" · инцидентов за сутки: {inc}" if inc else ""), ""]
     for k in bad:
         s = since.get(k); L.append(f"{SEV.get(k, '🟡')} {esc(cap1(c[k]['title']))}: {esc(c[k]['detail'])}" + (f", с {hhmm(s)}" if s else ""))
     if bad: L.append("")
-    L += [f"{h.get('flag', '🇳🇱')} <b>{esc(h.get('node', 'Амстердам'))}</b> · {esc(h.get('ip', ''))}",
-          f"{m('xhttp')} Основной :443  {m('tcp')} Резерв :{h.get('tcp_port', 8443)}  {m('awg')} AmneziaWG  {m('nginx')} nginx",
-          f"{m('egress4')} Интернет IPv4" + (f" · {m('egress6')} IPv6{'' if ok('egress6') else ' не выходит'}" if "egress6" in c else "")]
     cert = h.get("cert", {})
-    L.append(f"{'🔒' if ok('cert14') and ok('selfsigned') else '🟡'} Сертификат {esc(cert.get('issuer', '?'))} · ещё {plural(cert.get('days', 0), 'день', 'дня', 'дней')}")
-    L.append(f"💾 Диск {h.get('disk_pct', '?')}% · 🧠 Память {h.get('mem_pct', '?')}% · ⏱ {dur(h.get('uptime_s', 0))} без перезагрузки")
-    if h.get("ru_host"): L += ["", f"🇷🇺 <b>Москва</b> · {esc(h['ru_host'])}", f"{m('ru')} Вход :443 → {esc(h.get('node', 'Амстердам'))}"]
-    if h.get("exit2_host"): L += ["", f"🛟 <b>Запасной</b> · {esc(h.get('exit2_domain') or h['exit2_host'])}", f"{m('exit2')} :443"]
+    L += [f"{h.get('flag', '🇳🇱')} <b>{esc(h.get('node', 'Амстердам'))}</b> · {esc(h.get('ip', ''))}",
+          f"{m('xhttp')} :443 · {m('tcp')} :{h.get('tcp_port', 8443)} · {m('awg')} AmneziaWG · {m('nginx')} nginx · {m('egress4')} IPv4"
+          + (f" · {m('egress6')} IPv6" if "egress6" in c else ""),
+          f"{'🔒' if ok('cert14') and ok('selfsigned') else '🟡'} Сертификат ещё {plural(cert.get('days', 0), 'день', 'дня', 'дней')}"
+          + ("" if ok("selfsigned") else f" · {esc(cert.get('issuer', '?'))}"),   # the issuer matters only when it is wrong
+          f"💾 Диск {h.get('disk_pct', '?')}% · 🧠 Память {h.get('mem_pct', '?')}% · ⏱ {dur(h.get('uptime_s', 0))} без перезагрузки"]
+    if h.get("ru_host"): L.append(f"🇷🇺 <b>Москва</b> · {esc(h['ru_host'])} · {m('ru')} :443")
+    if h.get("exit2_host"): L.append(f"🛟 <b>Запасной</b> · {esc(h.get('exit2_domain') or h['exit2_host'])} · {m('exit2')} :443")
     s = h.get("sites", {"total": 0, "down": []}); down = s.get("down", [])
-    L += ["", f"🌐 Сайты: {s['total'] - len(down)} из {s['total']} открываются" + (f" · не отвечают: {esc(', '.join(SITE.get(x, x) for x in down))}" if down else "")]
-    on = sorted(online_set()); L.append(f"👥 В сети: {', '.join(esc(n) for n in on) if on else 'никого'}")
+    L.append(f"🌐 Сайты {s['total'] - len(down)}/{s['total']}"      # who is online is on the home screen, one tap away
+             + (f" · не отвечают: {esc(', '.join(SITE.get(x, x) for x in down))}" if down else ""))
     ev = recent_incidents(3)
     if ev: L += [""] + ev
     return "\n".join(L), [[btn("🔄 Проверить сейчас", "recheck"), btn("🔄 Сменить IP", "newip")], [btn("← Люди", "home")]]
@@ -353,42 +365,48 @@ def status(chat, mid=None):
     return send(chat, text, kb)
 
 # ── actions ───────────────────────────────────────────────────────────────────
-ASK_NAME = "➕ Имя нового человека?\nЛатиницей, цифры, «-» и «_», до 32 символов."
+ASK_NAME = "➕ Имя? Латиницей, без пробелов."
+BAD_NAME = "➕ Только латиница, цифры, «-» и «_», до 32 символов. Ещё раз?"   # the full rule only once it matters
 
-def ask_name(chat, mid=None):
+def ask_name(chat, mid=None, text=ASK_NAME):
     kb = [[btn("← Люди", "home")]]
-    mid = (edit(chat, mid, ASK_NAME, kb) or mid) if mid else send(chat, ASK_NAME, kb)
+    if mid: edit(chat, mid, text, kb)
+    else: mid = send(chat, text, kb)
     PENDING_ADD[chat] = (time.time() + 300, mid)
 
 def do_add(chat, name, mid=None):
-    if not NAME_RE.match(name):
-        return send(chat, "Имя латиницей: буквы, цифры, «-» и «_», до 32 символов.", [[btn("← Люди", "home")]])
-    if find_user(name):
-        drop(chat, mid); return card(chat, find_user(name))
+    if not NAME_RE.match(name): return ask_name(chat, mid, BAD_NAME)   # same message, and still waiting for a name
+    if find_user(name): return person(chat, mid, find_user(name))
     if mid: edit(chat, mid, f"⏳ Создаю {esc(name)} на всех нодах…")
     else: mid = send(chat, f"⏳ Создаю {esc(name)} на всех нодах…")
     rc, out = sh(["/usr/local/bin/add-client.sh", name])
     if rc != 0: return edit(chat, mid, f"❌ Не удалось создать {esc(name)}\n<pre>{esc(tail(out))}</pre>", [[btn("← Люди", "home")]])
-    drop(chat, mid); card(chat, name)
+    person(chat, mid, name)
 
 def ask_del(chat, mid, name):
-    edit(chat, mid, f"🗑 Удалить {esc(name)}?\nКлючи перестанут работать сразу, файлы удалятся.",
-         [[btn("Да, удалить", f"dy:{name}"), btn("Отмена", f"u:{name}")]])
+    text = f"🗑 Удалить {esc(name)}? Ключи сразу перестанут работать."
+    kb = [[btn("Да, удалить", f"dy:{name}"), btn("Отмена", f"u:{name}")]]
+    if mid: edit(chat, mid, text, kb)
+    else: mid = send(chat, text, kb)
+    return mid
 
 def do_del(chat, mid, name):
     edit(chat, mid, f"⏳ Удаляю {esc(name)}…")
     rc, out = sh(["/usr/local/bin/del-client.sh", name])
     if rc != 0: return edit(chat, mid, f"❌ Не удалось удалить {esc(name)}\n<pre>{esc(tail(out))}</pre>", [[btn("← Люди", "home")]])
+    for old in LAST_CARD.pop(chat, []): drop(chat, old)   # their card must not linger with a dead key in it
     text, kb = home_view()
     edit(chat, mid, f"🗑 {esc(name)} удалён\n\n{text}", kb)
 
-def ask_newip(chat, mid):
+def ask_newip(chat, mid=None):
+    kb = [[btn("Да, менять", "newip:go"), btn("Отмена", "status")]]
     if not ENV.get("TW_API_TOKEN") or not ENV.get("TW_SERVER_ID"):
-        return edit(chat, mid, "🔄 Смена IP не настроена: добавь TW_API_TOKEN и TW_SERVER_ID в /etc/safechill/vpn.env", [[btn("← Люди", "home")]])
-    ip = env_now().get("SERVER_IP", "")
-    edit(chat, mid, f"🔄 Сменить IPv4 Амстердама?\nСейчас {esc(ip)}. Timeweb выдаст новый адрес.\n"
-                    f"DNS, вход через Россию и подписки ClashMi обновятся сами.\nПрямые ключи Amnezia перестанут работать — нужно разослать новые.",
-         [[btn("Да, менять", "newip:go"), btn("Отмена", "status")]])
+        text, kb = "🔄 Смена IP не настроена: добавь TW_API_TOKEN и TW_SERVER_ID в /etc/safechill/vpn.env", [[btn("← Люди", "home")]]
+    else:
+        text = (f"🔄 Сменить IPv4 Амстердама? Сейчас {esc(env_now().get('SERVER_IP', ''))}.\n"
+                f"Ключи Amnezia придётся разослать заново. Остальное обновится само.")
+    if mid: edit(chat, mid, text, kb)
+    else: send(chat, text, kb)
 
 def do_newip(chat, mid):
     old = env_now().get("SERVER_IP", "")
@@ -397,19 +415,21 @@ def do_newip(chat, mid):
     new = env_now().get("SERVER_IP", "")
     if rc != 0 or not new or new == old:
         return edit(chat, mid, f"❌ Timeweb не выдал новый IP\n<pre>{esc(tail(out, 10))}</pre>", [[btn("← Люди", "home")]])
-    edit(chat, mid, f"✅ Новый IP Амстердама: {esc(new)} (был {esc(old)})\nПодписки ClashMi обновятся сами. Ключи Amnezia разошли заново из списка людей.\n"
-                    f"Старый IP отпусти ночью: /dropip {esc(old)} — сервер перезагрузится на ~5 мин.", [[btn("← Люди", "home")]])
+    edit(chat, mid, f"✅ Амстердам: {esc(new)} (был {esc(old)})\nРазошли ключи Amnezia заново.",
+         [[btn(f"🗑 Отпустить {old}", f"dropask:{old}")], [btn("← Люди", "home")]])
 
-def ask_dropip(chat, ip):
+def ask_dropip(chat, ip, mid=None):
     if not IP_RE.match(ip): return send(chat, "/dropip 1.2.3.4")
-    if ip == env_now().get("SERVER_IP"): return send(chat, f"⛔ {esc(ip)} — адрес, к которому подключаются люди. Сначала смени IP.")
-    send(chat, f"🗑 Отпустить IP {esc(ip)}?\nTimeweb перезагрузит сервер, VPN ляжет на ~5 минут.",
-         [[btn("Да, отпустить", f"dropip:{ip}"), btn("← Люди", "home")]])
+    if ip == env_now().get("SERVER_IP"): return send(chat, f"⛔ {esc(ip)} — к нему подключаются люди. Сначала смени IP.")
+    text = f"🗑 Отпустить IP {esc(ip)}? Timeweb перезагрузит сервер — VPN ляжет на ~5 минут, лучше ночью."
+    kb = [[btn("Да, отпустить", f"dropip:{ip}"), btn("← Люди", "home")]]
+    if mid: edit(chat, mid, text, kb)
+    else: send(chat, text, kb)
 
 def do_dropip(chat, mid, ip):
     edit(chat, mid, f"⏳ Отпускаю {esc(ip)}…")
     rc, out = sh(["/usr/local/bin/drop-ip.sh", ip], timeout=120)
-    edit(chat, mid, f"✅ IP {esc(ip)} отпущен. Сервер перезагружается, вернусь через ~5 мин." if rc == 0
+    edit(chat, mid, f"✅ IP {esc(ip)} отпущен. Сервер перезагружается, ~5 мин." if rc == 0
                     else f"❌ Не удалось отпустить {esc(ip)}\n<pre>{esc(tail(out, 10))}</pre>", [[btn("← Люди", "home")]])
 
 def do_recheck(chat, mid):
@@ -442,14 +462,14 @@ def on_message(msg):
         elif cmd == "/qr":
             if not args: return send(chat, "/qr Имя [clash|ru|nl|awg|x2]")
             name = find_user(args[0])
-            if not name: return send(chat, f"Нет такого человека: {esc(args[0])}", [[btn("← Люди", "home")]])
-            card(chat, name, args[1].lower() if len(args) > 1 else None)
+            if not name: return send(chat, f"Нет такого человека: {esc(args[0])}")
+            person(chat, None, name, args[1].lower() if len(args) > 1 else None)
         elif cmd == "/del":
             name = find_user(args[0]) if args else None
-            if not name: return send(chat, "/del Имя", [[btn("← Люди", "home")]])
-            ask_del(chat, send(chat, "…"), name)
+            if not name: return send(chat, "/del Имя")
+            ask_del(chat, None, name)
         elif cmd == "/status": status(chat)
-        elif cmd == "/newip": ask_newip(chat, send(chat, "…"))
+        elif cmd == "/newip": ask_newip(chat)
         elif cmd == "/dropip":
             if not args: return send(chat, "/dropip 1.2.3.4")
             ask_dropip(chat, args[0])
@@ -463,33 +483,22 @@ def on_callback(cq):
     if frm not in ADMINS or chat is None: return toast(cid, "Только для администратора")
     log("cb", data, "from", frm)
     kind, _, rest = data.partition(":")
-    is_photo = bool(m.get("photo"))
+    toast(cid)                          # the button's own spinner is the feedback; a toast saying "wait" is noise
+    if m.get("photo"): drop(chat, mid); mid = None      # a card from an older build: start a clean live message
     try:
-        if kind == "u":                                   # person tapped in the list → the list becomes the card
-            toast(cid, "Открываю…")
-            if is_photo: card(chat, rest, None, mid)
-            else:                                         # the list stays on screen as a visible "wait" while the card loads
-                edit(chat, mid, f"⏳ Открываю {esc(rest)}…"); card(chat, rest); drop(chat, mid)
-        elif kind == "k":                                 # another profile → the same card morphs
-            name, _, v = rest.partition(":"); toast(cid, "Готовлю…"); card(chat, name, v, mid if is_photo else None)
-        elif kind == "home":
-            toast(cid)
-            if is_photo: drop(chat, mid); home(chat)
-            else: home(chat, mid)
-        elif kind == "add": toast(cid); ask_name(chat, None if is_photo else mid)
-        elif kind == "status": toast(cid); (drop(chat, mid), status(chat)) if is_photo else status(chat, mid)
-        elif kind == "recheck": toast(cid, "Проверяю…"); do_recheck(chat, mid)
-        elif kind == "d":                                 # delete: confirm inside a plain message, the card goes away
-            toast(cid)
-            if is_photo: drop(chat, mid); ask_del(chat, send(chat, "…"), rest)
-            else: ask_del(chat, mid, rest)
-        elif kind == "dy": toast(cid); do_del(chat, mid, rest)
+        if kind == "u": person(chat, mid, rest)                                  # the list becomes that person
+        elif kind == "k": name, _, v = rest.partition(":"); person(chat, mid, name, v)
+        elif kind == "home": home(chat, mid)
+        elif kind == "add": ask_name(chat, mid)
+        elif kind == "status": status(chat, mid)
+        elif kind == "recheck": do_recheck(chat, mid)
+        elif kind == "d": ask_del(chat, mid, rest)
+        elif kind == "dy": do_del(chat, mid, rest)
         elif kind == "newip":
-            toast(cid)
             if rest == "go": do_newip(chat, mid)
             else: ask_newip(chat, mid)
-        elif kind == "dropip": toast(cid); do_dropip(chat, mid, rest)
-        else: toast(cid)
+        elif kind == "dropask": ask_dropip(chat, rest, mid)
+        elif kind == "dropip": do_dropip(chat, mid, rest)
     except Exception as e:  # noqa: BLE001
         log("error", repr(e)); send(chat, f"❌ Ошибка бота\n<pre>{esc(str(e)[:500])}</pre>", [[btn("← Люди", "home")]])
 
