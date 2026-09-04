@@ -10,12 +10,14 @@
 # user root <ip> [preauth]". The default "normal" filter only matches real auth failures, so it would
 # read this log and ban precisely nobody.
 #
-# findtime/maxretry are what separate a spammer from a person, and they are set wide on purpose. The
-# scanner knocks ~36 times an hour; ten failures inside an hour is something a human being connecting
-# from a new laptop, a different VPN or a phone will not do, especially since a successful key login
-# leaves no failure at all. Someone who fumbles once or twice is never touched. bantime starts at an
-# hour and doubles for repeat offenders up to a day, so a mistake in this file heals itself while a
-# persistent scanner still gets shut out.
+# findtime is a DAY, not the usual ten minutes, and that is the whole point. Measured over 24h here:
+# five scanners at 62, 52, 25, 22 and 18 knocks each — none of them bursting, all of them trickling one
+# or two an hour. Any short window lets every one of them through forever. A day-long window with
+# maxretry 15 catches all five, and stays safe for people: fifteen failures in a day with not one
+# success in between is not something a human does, and a successful key login resets the count to zero
+# anyway (the filter tags "Accepted publickey" as MLFGAINED). dbpurgeage has to outlast findtime or the
+# counters are thrown away before the window closes. bantime starts at an hour and doubles per repeat
+# up to a day, so a mistake in this file heals itself while a persistent scanner still gets shut out.
 #
 # ignoreip holds NO personal addresses — deliberately, since admin access comes from changing IPs and
 # other VPNs, and a list of those would go stale and lock somebody out. What is here is structural:
@@ -26,8 +28,9 @@
 # reason as the node's own address: a client on the tunnel reaches :22 from inside it.
 [DEFAULT]
 ignoreip = 127.0.0.1/8 ::1 ${SERVER_IP} ${SERVER_IP6} ${RU_HOST} ${EXIT2_HOST} ${AWG_NET4}.0/24 ${AWG_NET6}::/64
-findtime = 1h
-maxretry = 10
+findtime = 1d
+maxretry = 15
+dbpurgeage = 2d
 bantime = 1h
 bantime.increment = true
 bantime.factor = 2
