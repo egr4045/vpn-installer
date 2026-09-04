@@ -38,7 +38,7 @@ say "Packages"
 export DEBIAN_FRONTEND=noninteractive
 for i in $(seq 1 60); do fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break; [ "$i" = 1 ] && echo "  waiting for apt/dpkg lock (unattended-upgrades?)"; sleep 5; done
 apt-get update -qq
-apt-get install -y -qq software-properties-common nginx certbot ufw qrencode jq curl iptables dkms zstd \
+apt-get install -y -qq software-properties-common nginx certbot ufw fail2ban qrencode jq curl iptables dkms zstd \
   gettext-base python3 openssl "linux-headers-$(uname -r)" >/dev/null   # zstd: without it dkms writes an EMPTY .ko.zst
 grep -rqs "amnezia" /etc/apt/sources.list.d/ || add-apt-repository -y ppa:amnezia/ppa >/dev/null
 apt-get install -y -qq amneziawg amneziawg-tools >/dev/null
@@ -93,6 +93,9 @@ fi
 # -- 3. kernel tuning ----------------------------------------------------------
 say "Kernel tuning (BBR, buffers, forwarding)"
 install -m644 "$REPO/templates/sysctl-99-vpn.conf" /etc/sysctl.d/99-vpn.conf
+# the distro default enables the sshd jail with no ignoreip, and admin ssh to this box arrives from
+# its own address through the VPN — so keep it stopped until render.sh has written jail.d
+systemctl stop fail2ban 2>/dev/null || true
 install -d /etc/systemd/journald.conf.d
 install -m644 "$REPO/templates/journald-99-safechill.conf" /etc/systemd/journald.conf.d/99-safechill.conf
 systemctl restart systemd-journald
@@ -142,6 +145,13 @@ say "Rendering xray + AmneziaWG"
 install -m755 "$REPO/bin/"*.sh "$REPO/bin/"*.py /usr/local/bin/
 rm -rf "$SHARE/templates"; cp -r "$REPO/templates" "$SHARE/templates"
 render.sh
+# render.sh has written jail.d/safechill.local now, so the ignore list exists before the jail starts;
+# refuse to start it if this node's own address somehow is not in there (see the template's comment).
+if [ -f /etc/fail2ban/jail.d/safechill.local ] && grep -q "$SERVER_IP" /etc/fail2ban/jail.d/safechill.local; then
+  systemctl enable --now fail2ban >/dev/null 2>&1 && ok "fail2ban watching sshd (ssh is key-only; this is for the journal)"
+else
+  echo "! fail2ban left stopped: $SERVER_IP is not in its ignore list"
+fi
 systemctl enable xray >/dev/null 2>&1 || true; systemctl restart xray
 systemctl enable "awg-quick@awg0" >/dev/null 2>&1 || true
 if systemctl restart "awg-quick@awg0"; then ok "xray + awg0 up"

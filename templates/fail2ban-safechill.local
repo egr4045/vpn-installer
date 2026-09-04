@@ -1,0 +1,27 @@
+# SafeChill: keep the ssh scanners out of the journal.
+#
+# This is not holding a door shut. sshd here is key-only (PasswordAuthentication no), so a brute force
+# cannot succeed however long it runs. What it can do is fill the journal, and the journal now keeps
+# eight days of xray access log — the record support questions get answered from. One scanner knocking
+# every 90 seconds is thousands of lines a day competing for that space.
+#
+# ignoreip is the dangerous half, so read it before changing it. Admin ssh to the exit node arrives
+# THROUGH the VPN: the client connects to :443, xray dials the node's own :22, and the auth log reads
+# "Accepted publickey for root from <this node's own address>". Ban that address and every tunnelled
+# session dies at once, with no way back in except the provider's console. Every node address is listed
+# for the same reason: the nodes ssh to each other (render.sh pushes configs, vpn-health.sh restarts a
+# remote xray), and the AWG subnets are here because someone on the tunnel can reach :22 that way too.
+#
+# maxretry is high on purpose. An ssh client offers every key in its agent and each rejected one is its
+# own "Failed publickey" line, so a person with a handful of keys can spend six failures on a single
+# successful connection. bantime is short on purpose too: with no password to guess there is nothing to
+# win by banning longer, and a mistake in this file then heals itself within the hour.
+[DEFAULT]
+ignoreip = 127.0.0.1/8 ::1 ${SERVER_IP} ${SERVER_IP6} ${RU_HOST} ${EXIT2_HOST} ${AWG_NET4}.0/24 ${AWG_NET6}::/64
+bantime = 1h
+findtime = 10m
+maxretry = 10
+
+[sshd]
+enabled = true
+mode = normal

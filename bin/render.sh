@@ -47,6 +47,18 @@ mkdir -p /etc/amnezia/amneziawg
 } > "$t1"
 install -m600 "$t1" /etc/amnezia/amneziawg/awg0.conf
 n_peers=$(find "$ETC/peers" -name '*.env' | wc -l)
+
+# -- fail2ban: the ignore list is every node's address, so it is re-rendered whenever one changes ---
+# Rendered here and pushed to the other nodes as-is: this file names all three, while each node's own
+# vpn.env knows only some of them (the standby has no RU_HOST), and a node missing a peer's address
+# from its ignore list could ban the very box that pushes it configs.
+tf2b=$(mktemp)
+envsubst < "$TPL/fail2ban-safechill.local" > "$tf2b"
+if [ -d /etc/fail2ban ]; then
+  install -d /etc/fail2ban/jail.d
+  install -m644 "$tf2b" /etc/fail2ban/jail.d/safechill.local
+  systemctl reload fail2ban 2>/dev/null || systemctl restart fail2ban 2>/dev/null || true
+fi
 echo "rendered this node: $n_users users (+relay), $n_peers awg peers, egress $EGRESS_STRATEGY"
 
 # -- standby exit (optional): same users/peers, rendered there ---------------------
@@ -56,7 +68,8 @@ if [ -n "${EXIT2_HOST:-}" ]; then
   if scp "${SSHOPT[@]}" -q "$ETC/users.json" "root@$EXIT2_HOST:/etc/safechill/users.json" \
      && scp "${SSHOPT[@]}" -q -r "$ETC/peers" "root@$EXIT2_HOST:/etc/safechill/" \
      && scp "${SSHOPT[@]}" -q -r "$TPL" "root@$EXIT2_HOST:/usr/local/share/safechill/templates.new" \
-     && ssh "${SSHOPT[@]}" "root@$EXIT2_HOST" "rm -rf /usr/local/share/safechill/templates && mv /usr/local/share/safechill/templates.new /usr/local/share/safechill/templates && install -d /etc/systemd/journald.conf.d && install -m644 /usr/local/share/safechill/templates/journald-99-safechill.conf /etc/systemd/journald.conf.d/99-safechill.conf && systemctl restart systemd-journald && render.sh >/dev/null && systemctl restart xray && (awg syncconf awg0 <(awg-quick strip awg0) 2>/dev/null || systemctl restart awg-quick@awg0)"; then
+     && scp "${SSHOPT[@]}" -q "$tf2b" "root@$EXIT2_HOST:/tmp/safechill-f2b.local" \
+     && ssh "${SSHOPT[@]}" "root@$EXIT2_HOST" "rm -rf /usr/local/share/safechill/templates && mv /usr/local/share/safechill/templates.new /usr/local/share/safechill/templates && install -d /etc/systemd/journald.conf.d && install -m644 /usr/local/share/safechill/templates/journald-99-safechill.conf /etc/systemd/journald.conf.d/99-safechill.conf && systemctl restart systemd-journald && render.sh >/dev/null && { if [ -d /etc/fail2ban ]; then install -d /etc/fail2ban/jail.d && install -m644 /tmp/safechill-f2b.local /etc/fail2ban/jail.d/safechill.local && { systemctl reload fail2ban 2>/dev/null || true; }; fi; } && systemctl restart xray && (awg syncconf awg0 <(awg-quick strip awg0) 2>/dev/null || systemctl restart awg-quick@awg0)"; then
     echo "synced standby exit $EXIT2_HOST ($n_users users, $n_peers peers)"
   else
     echo "WARNING: could not sync standby exit $EXIT2_HOST (unreachable?)" >&2
@@ -91,7 +104,8 @@ if [ -n "${RU_HOST:-}" ]; then
   if scp "${SSHOPT[@]}" -q "$t2" "root@$RU_HOST:/usr/local/etc/xray/config.json" \
      && scp "${SSHOPT[@]}" -q "$t3" "root@$RU_HOST:/etc/safechill/ru.env" \
      && scp "${SSHOPT[@]}" -q "$TPL/journald-99-safechill.conf" "root@$RU_HOST:/tmp/journald-safechill.conf" \
-     && ssh "${SSHOPT[@]}" "root@$RU_HOST" "install -d /etc/systemd/journald.conf.d && install -m644 /tmp/journald-safechill.conf /etc/systemd/journald.conf.d/99-safechill.conf && systemctl restart systemd-journald" \
+     && scp "${SSHOPT[@]}" -q "$tf2b" "root@$RU_HOST:/tmp/safechill-f2b.local" \
+     && ssh "${SSHOPT[@]}" "root@$RU_HOST" "install -d /etc/systemd/journald.conf.d && install -m644 /tmp/journald-safechill.conf /etc/systemd/journald.conf.d/99-safechill.conf && systemctl restart systemd-journald && { if [ -d /etc/fail2ban ]; then install -d /etc/fail2ban/jail.d && install -m644 /tmp/safechill-f2b.local /etc/fail2ban/jail.d/safechill.local && { systemctl reload fail2ban 2>/dev/null || true; }; fi; }" \
      && ssh "${SSHOPT[@]}" "root@$RU_HOST" "chmod 644 /usr/local/etc/xray/config.json; chmod 600 /etc/safechill/ru.env; systemctl restart xray && systemctl is-active xray" >/dev/null; then
     echo "pushed RU relay config to $RU_HOST ($n_users users${EXIT2_HOST:+, balancer -> $EXIT2_HOST on failure}), xray restarted there"
   else
