@@ -13,8 +13,8 @@ install -d /etc/systemd/journald.conf.d
 printf '[Journal]
 Storage=persistent
 MaxRetentionSec=8day
-SystemMaxUse=1G
-SystemMaxFileSize=64M
+SystemMaxUse=4G
+SystemMaxFileSize=128M
 ' > /etc/systemd/journald.conf.d/99-safechill.conf
 systemctl restart systemd-journald
 ufw default deny incoming >/dev/null; ufw default allow outgoing >/dev/null

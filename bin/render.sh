@@ -90,6 +90,8 @@ if [ -n "${RU_HOST:-}" ]; then
     echo "NODE_NAME=${RU_NODE_NAME:-Москва}"; echo "EXIT_NAME=${NODE_NAME:-Амстердам}"; } > "$t3"
   if scp "${SSHOPT[@]}" -q "$t2" "root@$RU_HOST:/usr/local/etc/xray/config.json" \
      && scp "${SSHOPT[@]}" -q "$t3" "root@$RU_HOST:/etc/safechill/ru.env" \
+     && scp "${SSHOPT[@]}" -q "$TPL/journald-99-safechill.conf" "root@$RU_HOST:/tmp/journald-safechill.conf" \
+     && ssh "${SSHOPT[@]}" "root@$RU_HOST" "install -d /etc/systemd/journald.conf.d && install -m644 /tmp/journald-safechill.conf /etc/systemd/journald.conf.d/99-safechill.conf && systemctl restart systemd-journald" \
      && ssh "${SSHOPT[@]}" "root@$RU_HOST" "chmod 644 /usr/local/etc/xray/config.json; chmod 600 /etc/safechill/ru.env; systemctl restart xray && systemctl is-active xray" >/dev/null; then
     echo "pushed RU relay config to $RU_HOST ($n_users users${EXIT2_HOST:+, balancer -> $EXIT2_HOST on failure}), xray restarted there"
   else
