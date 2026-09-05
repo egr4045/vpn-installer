@@ -9,7 +9,12 @@ server {
     location / { return 301 https://$host$request_uri; }
 }
 server {
-    listen 127.0.0.1:8444 ssl http2;
+    # xray hands each stolen connection over with a PROXY-protocol header (realitySettings.xver = 1), so the
+    # access log names who actually knocked on :443 — without it every visitor of this site was 127.0.0.1.
+    # Nothing but xray may connect here: a plain TLS client on 8444 is now refused for lacking that header.
+    listen 127.0.0.1:8444 ssl http2 proxy_protocol;
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
     server_name ${DOMAIN};
     ssl_certificate     ${CERT_DIR}/fullchain.pem;
     ssl_certificate_key ${CERT_DIR}/privkey.pem;

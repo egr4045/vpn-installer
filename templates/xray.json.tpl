@@ -10,7 +10,7 @@
         "network": "xhttp", "security": "reality",
         "xhttpSettings": { "path": "/${XHTTP_PATH}", "mode": "auto" },
         "realitySettings": {
-          "show": false, "target": "127.0.0.1:8444", "xver": 0,
+          "show": false, "target": "127.0.0.1:8444", "xver": 1,
           "serverNames": [ "${DOMAIN}" ],
           "privateKey": "${REALITY_PRIV}", "shortIds": [ "${SHORT_ID}" ]
         }
