@@ -526,6 +526,7 @@ def main():
     except Exception: pass
     off_file = STATE / "bot.offset"; offset = int(off_file.read_text()) if off_file.exists() else 0
     log("bot started, admins", ADMINS)
+    beat = time.time(); polls = handled = 0   # hourly heartbeat: an idle bot and a hung one look the same in the journal otherwise
     while True:
         try:
             res = api("getUpdates", _timeout=SOCK, offset=offset, timeout=POLL, allowed_updates=["message", "callback_query"])
@@ -534,7 +535,11 @@ def main():
             log("poll http", e.code); time.sleep(2 if e.code == 409 else 5); continue
         except (TimeoutError, urllib.error.URLError, OSError) as e:
             log("poll retry:", e); continue          # a stalled poll socket is routine — re-poll at once
+        polls += 1
+        if time.time() - beat >= 3600:
+            log(f"alive: {polls} polls, {handled} updates in the last hour"); beat = time.time(); polls = handled = 0
         for upd in res.get("result", []):
+            handled += 1
             offset = upd["update_id"] + 1; off_file.write_text(str(offset))
             try:
                 if "message" in upd: on_message(upd["message"])
