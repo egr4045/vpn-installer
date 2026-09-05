@@ -44,6 +44,19 @@ RU_DIRECT = [
     "yandex.net", "yandex.com", "ya.cc", "avito.st", "ozonusercontent.com", "2gis.com", "sberbank.com",
 ]
 
+# BitTorrent never survives the tunnel anyway: xray drops it (BLOCK_TORRENT=1) to keep the hoster's
+# abuse desk quiet, so through the VPN a torrent client is not slow, it is dead — and it still costs the
+# exit node the setup of every peer connection before the drop (22796 of them in two hours, measured).
+# Sent out of the machine's own interface it simply works, and the ad windows these clients open stop
+# travelling to Amsterdam as well. Matching is by process, because peer addresses and ports are random.
+# Needs find-process-mode != off, which is a client-side setting: ClashMi overrides the profile with its own.
+DIRECT_PROCESS = [
+    "uTorrent.exe", "uTorrentClient.exe", "utorrentie.exe", "BitTorrent.exe",
+    "qbittorrent.exe", "qbittorrent-nox.exe", "transmission-qt.exe", "transmission-daemon.exe",
+    "deluge.exe", "deluged.exe", "tixati.exe", "Vuze.exe", "aria2c.exe",
+    "qbittorrent", "transmission-qt", "transmission-daemon", "deluge", "deluged", "aria2c",
+]
+
 def load_env(p):
     env = {}
     for line in pathlib.Path(p).read_text().splitlines():
@@ -127,8 +140,9 @@ def main():
 
     cfg = {
         "mixed-port": 7890, "allow-lan": False, "mode": "rule", "log-level": "warning", "ipv6": True,
-        "unified-delay": True, "tcp-concurrent": True, "find-process-mode": "off",
+        "unified-delay": True, "tcp-concurrent": True,
         "geodata-mode": False, "geo-auto-update": True, "geo-update-interval": 168,
+        "find-process-mode": "strict",
         "profile": {"store-selected": True, "store-fake-ip": True},
         "sniffer": {"enable": True, "sniff": {"HTTP": {"ports": [80, 8080]}, "TLS": {"ports": [443, 8443]}}},
         # respect-rules puts every lookup through the same rules as the traffic it is for. Without it the
@@ -148,6 +162,8 @@ def main():
                 "proxy-server-nameserver": ["https://1.1.1.1/dns-query", "https://dns.google/dns-query"]},
         "proxies": proxies, "proxy-groups": groups,
         "rules": [
+            # first, before every other rule: whatever these processes do goes out of the local interface
+        ] + [f"PROCESS-NAME,{n},DIRECT" for n in DIRECT_PROCESS] + [
             # our own domain direct, so the profile can always be refreshed even when every tunnel is down
             f"DOMAIN-SUFFIX,{apex},DIRECT",
         ] + [f"IP-CIDR{'6' if ':' in h else ''},{h}/{128 if ':' in h else 32},DIRECT,no-resolve"
