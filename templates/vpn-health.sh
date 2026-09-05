@@ -321,11 +321,45 @@ preview_send() {
 }
 
 # ── run ──────────────────────────────────────────────────────────────────────────────────────────
+# ── AmneziaWG log ────────────────────────────────────────────────────────────────────────────────
+# The kernel keeps no record of who connected over awg0 — only "latest handshake" per key, and the next
+# handshake overwrites it. Each run diffs that against the previous run and writes what changed to the
+# journal (journalctl -t safechill-awg): every handshake at info; a new session (5+ min of silence before
+# it) or a changed address at notice; a key that no peers/*.env explains at warning — a person removed
+# here who can still connect, which is exactly how three deleted people were found still valid on the standby.
+awg_log() {
+  local dump prev="$LIB/awg.last" next="$LIB/awg.last.tmp" pub psk ep ips hs rx tx ka name f ohs orx otx oep line pri
+  # tail -n +2: the first dump line is the interface itself and starts with its PRIVATE key. It must be dropped
+  # by position — AmneziaWG's interface line carries the obfuscation parameters too, so counting fields does
+  # not tell it apart from a peer (that mistake once logged the first characters of the key).
+  dump=$(awg show awg0 dump 2>/dev/null | tail -n +2); [ -n "$dump" ] || return 0
+  local -A PNAME=(); for f in "$ETC"/peers/*.env; do [ -f "$f" ] || continue; PNAME[$(sed -n 's/^PEER_PUB=//p' "$f")]=$(sed -n 's/^PEER_NAME=//p' "$f"); done
+  ( umask 077; : > "$next" )
+  while read -r pub psk ep ips hs rx tx ka; do
+    [ -n "$ka" ] && [ "$ka" != "off" -o "$ka" = "off" ] || continue   # a peer line has exactly 8 fields
+    printf '%s\t%s\t%s\t%s\t%s\n' "$pub" "$hs" "$rx" "$tx" "$ep" >> "$next"
+    [ "${hs:-0}" -gt 0 ] 2>/dev/null || continue   # never connected
+    IFS=$'\t' read -r ohs orx otx oep <<<"$(awk -F'\t' -v k="$pub" '$1==k{print $2"\t"$3"\t"$4"\t"$5; exit}' "$prev" 2>/dev/null)"
+    [ "$hs" != "${ohs:-}" ] || continue            # no handshake since the last run
+    name=${PNAME[$pub]:-}; pri=info
+    line="${name:-UNKNOWN KEY ${pub:0:12}…} handshake $(TZ=Europe/Moscow date -d "@$hs" +%H:%M:%S) from $ep"
+    # the address is compared without the port: one person's several AWG clients (ClashMi keeps one per
+    # server in a group) share the key and hop between source ports every minute — only a new IP is news
+    if [ -z "${ohs:-}" ] || [ $((hs - ohs)) -gt 300 ]; then line="$line · new session"; pri=notice
+    elif [ "${ep%:*}" != "${oep%:*}" ]; then line="$line · address changed from ${oep:-?}"; pri=notice; fi
+    [ -n "${orx:-}" ] && line="$line · +$(( rx >= orx ? (rx - orx) / 1024 : rx / 1024 )) KB in, +$(( tx >= otx ? (tx - otx) / 1024 : tx / 1024 )) KB out"
+    [ -n "$name" ] || pri=warning
+    logger -t safechill-awg -p "daemon.$pri" -- "$line"
+  done <<<"$dump"
+  mv "$next" "$prev"
+}
+
 [ -n "$PREVIEW" ] && { preview_send; exit 0; }
 flush_spool
 check xhttp   crit p_xhttp   "systemctl restart xray" xray
 check tcp     warn p_tcp     "systemctl restart xray" xray
 check awg     warn p_awg     "systemctl restart awg-quick@awg0" awg-quick@awg0
+awg_log
 check nginx   warn p_nginx   "systemctl restart nginx" nginx
 check egress4 crit p_egress4
 [ -n "${SERVER_IP6:-}" ] && check egress6 info p_egress6
