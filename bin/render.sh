@@ -68,11 +68,18 @@ if [ -n "${EXIT2_HOST:-}" ]; then
   # whatever it was installed with — its xray stayed at loglevel=warning for exactly that reason, and its
   # vpn-health.sh stayed on the version from install day, sending a second copy of every alert.
   # HEALTH_TG=0 is set here, not in the template: only one of the two exits may talk to Telegram.
-  if scp "${SSHOPT[@]}" -q "$ETC/users.json" "root@$EXIT2_HOST:/etc/safechill/users.json" \
-     && scp "${SSHOPT[@]}" -q -r "$ETC/peers" "root@$EXIT2_HOST:/etc/safechill/" \
+  # peers/ is REPLACED there, not merged: scp -r onto an existing directory only adds files, so a person
+  # deleted here kept a valid AmneziaWG key on the standby (three removed people still had one on 2026-09-05).
+  # This script goes too: the standby renders with its OWN copy of render.sh, and that copy dated from its
+  # install day — templates arrived, the code that turns them into configs did not (its nginx site was never
+  # re-rendered because the old render.sh had no such step).
+  if ssh "${SSHOPT[@]}" "root@$EXIT2_HOST" "rm -rf /etc/safechill/peers.new" \
+     && scp "${SSHOPT[@]}" -q "$(readlink -f "${BASH_SOURCE[0]}")" "root@$EXIT2_HOST:/usr/local/bin/render.sh" \
+     && scp "${SSHOPT[@]}" -q "$ETC/users.json" "root@$EXIT2_HOST:/etc/safechill/users.json" \
+     && scp "${SSHOPT[@]}" -q -r "$ETC/peers" "root@$EXIT2_HOST:/etc/safechill/peers.new" \
      && scp "${SSHOPT[@]}" -q -r "$TPL" "root@$EXIT2_HOST:/usr/local/share/safechill/templates.new" \
      && scp "${SSHOPT[@]}" -q "$tf2b" "root@$EXIT2_HOST:/tmp/safechill-f2b.local" \
-     && ssh "${SSHOPT[@]}" "root@$EXIT2_HOST" "rm -rf /usr/local/share/safechill/templates && mv /usr/local/share/safechill/templates.new /usr/local/share/safechill/templates && install -d /etc/systemd/journald.conf.d && install -m644 /usr/local/share/safechill/templates/journald-99-safechill.conf /etc/systemd/journald.conf.d/99-safechill.conf && systemctl restart systemd-journald && render.sh >/dev/null && { if [ -d /etc/fail2ban ]; then install -d /etc/fail2ban/jail.d && install -m644 /tmp/safechill-f2b.local /etc/fail2ban/jail.d/safechill.local && { systemctl reload fail2ban 2>/dev/null || true; }; fi; } && sed -i '/^HEALTH_TG=/d' /etc/safechill/vpn.env && echo HEALTH_TG=0 >> /etc/safechill/vpn.env && systemctl restart xray && (awg syncconf awg0 <(awg-quick strip awg0) 2>/dev/null || systemctl restart awg-quick@awg0)"; then
+     && ssh "${SSHOPT[@]}" "root@$EXIT2_HOST" "rm -rf /etc/safechill/peers && mv /etc/safechill/peers.new /etc/safechill/peers && rm -rf /usr/local/share/safechill/templates && mv /usr/local/share/safechill/templates.new /usr/local/share/safechill/templates && install -d /etc/systemd/journald.conf.d && install -m644 /usr/local/share/safechill/templates/journald-99-safechill.conf /etc/systemd/journald.conf.d/99-safechill.conf && systemctl restart systemd-journald && render.sh >/dev/null && { if [ -d /etc/fail2ban ]; then install -d /etc/fail2ban/jail.d && install -m644 /tmp/safechill-f2b.local /etc/fail2ban/jail.d/safechill.local && { systemctl reload fail2ban 2>/dev/null || true; }; fi; } && sed -i '/^HEALTH_TG=/d' /etc/safechill/vpn.env && echo HEALTH_TG=0 >> /etc/safechill/vpn.env && systemctl restart xray && (awg syncconf awg0 <(awg-quick strip awg0) 2>/dev/null || systemctl restart awg-quick@awg0)"; then
     echo "synced standby exit $EXIT2_HOST ($n_users users, $n_peers peers)"
   else
     echo "WARNING: could not sync standby exit $EXIT2_HOST (unreachable?)" >&2
@@ -115,5 +122,20 @@ if [ -n "${RU_HOST:-}" ]; then
     echo "WARNING: could not push config to RU node $RU_HOST (unreachable?) — exit node is fine" >&2
   fi
   rm -f "$t3"
+fi
+
+# -- nginx steal site: rendered here as well, so the standby stops drifting from the template -----------
+# (install.sh rendered it once; the standby then kept its install-day config and never got /c/ and /z/).
+# Deliberately the LAST step: when the template changes what xray hands to nginx (PROXY protocol), the
+# caller's xray restart follows this reload within a second instead of a minute of the two disagreeing.
+if [ -n "${CERT_DIR:-}" ] && [ -f "$CERT_DIR/fullchain.pem" ] && grep -qs 8444 /etc/nginx/sites-available/safechill; then
+  tng=$(mktemp); envsubst '${DOMAIN} ${CERT_DIR}' < "$TPL/nginx-site.conf.tpl" > "$tng"
+  if ! cmp -s "$tng" /etc/nginx/sites-available/safechill; then
+    cp -a /etc/nginx/sites-available/safechill "$tng.bak"; install -m644 "$tng" /etc/nginx/sites-available/safechill
+    if nginx -t >/dev/null 2>&1; then systemctl reload nginx && echo "nginx site re-rendered from the template"
+    else install -m644 "$tng.bak" /etc/nginx/sites-available/safechill; echo "WARNING: rendered nginx config failed nginx -t, kept the old one" >&2; fi
+    rm -f "$tng.bak"
+  fi
+  rm -f "$tng"
 fi
 rm -f "$t1" "$t2"
