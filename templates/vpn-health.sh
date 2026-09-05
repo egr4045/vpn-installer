@@ -19,7 +19,17 @@ set -u
 ETC=/etc/safechill; LIB=/var/lib/safechill; STATE=$LIB/health.state; LOG=/var/log/vpn-health.log
 set -a; . "$ETC/vpn.env" 2>/dev/null; set +a
 TCP_PORT=${TCP_PORT:-8443}; FALLBACK_SNI=${FALLBACK_SNI:-gateway.icloud.com}; BRAND=${BRAND:-SafeChill}
-NODE=${NODE_NAME:-Амстердам}; FLAG=${NODE_FLAG:-🇳🇱}
+NODE=${NODE_NAME:-Амстердам}; FLAG=${NODE_FLAG:-🇳🇱}; EXIT2_NAME=${EXIT2_NAME:-Запасной}
+# genitive forms, so an alert reads "не открывается с Амстердама" and not "с Амстердам"
+NODE_GEN=${NODE_GEN:-Амстердама}; EXIT2_GEN=${EXIT2_GEN:-Запасного}
+# Exactly one node speaks for the Dutch pair. Two exits running the same probes sent two of every alert
+# and two morning digests, and both would try to bind the chat through getUpdates and collide (409).
+# The standby runs with HEALTH_TG=0: it still probes, still self-heals, still writes health.json, and
+# this node reads that file over ssh and speaks for both. Moscow keeps its own voice on purpose — it is
+# the only place that can see the exit blocked FROM Russia, which is a different fact, not a copy.
+HEALTH_TG=${HEALTH_TG:-1}
+declare -A ALSO; X2_DOWN=""; X2_DISK=""; PREVIEW=""
+[ "${1:-}" = "--preview" ] && { PREVIEW=${2:-}; [ -n "$PREVIEW" ] || { echo "usage: $0 --preview <chat_id>" >&2; exit 2; }; }
 SERVICES=${SERVICES:-"www.youtube.com www.google.com www.instagram.com web.telegram.org chatgpt.com x.com www.facebook.com discord.com www.tiktok.com web.whatsapp.com github.com www.netflix.com"}
 mkdir -p "$LIB"; touch "$STATE"
 NOW=$(date +%s); TODAY=$(TZ=Europe/Moscow date +%F); TG="https://api.telegram.org/bot${TG_BOT_TOKEN:-}"
@@ -34,11 +44,13 @@ logl() { echo "$(date +%FT%T) $*" >> "$LOG"; }
 msg()  { printf '%s\n' "$@" | sed '/^$/d'; }            # join non-empty lines
 emo()  { case $1 in crit) echo 🔴;; warn) echo 🟠;; *) echo 🟡;; esac; }
 loud() { case $1 in crit|warn) echo 0;; *) echo 1;; esac; }   # 0 = with sound
+verb() { local m=$(( $1 % 10 )) h=$(( $1 % 100 )); if [ "$m" = 1 ] && [ "$h" != 11 ]; then echo "$2"; else echo "$3"; fi; }
 plural() { local n=$1 one=$2 few=$3 many=$4 m=$(( $1 % 10 )) h=$(( $1 % 100 ))
   if [ "$m" = 1 ] && [ "$h" != 11 ]; then echo "$n $one"; elif [ "$m" -ge 2 ] && [ "$m" -le 4 ] && { [ "$h" -lt 12 ] || [ "$h" -gt 14 ]; }; then echo "$n $few"; else echo "$n $many"; fi; }
 
 # ── Telegram ─────────────────────────────────────────────────────────────────────────────────────
 tg_chat() { # chat id: TG_CHAT_ID, else /etc/safechill/tg_chat_id (the bot writes it on the first admin message)
+  [ -n "$PREVIEW" ] && { echo "$PREVIEW"; return 0; }
   local id="${TG_CHAT_ID:-}"; [ -n "$id" ] || id=$(cat "$ETC/tg_chat_id" 2>/dev/null || true)
   if [ -z "$id" ]; then
     [ "${BOT_ENABLED:-1}" = 1 ] && return 1          # the bot owns getUpdates; it will bind the chat itself
@@ -56,12 +68,14 @@ tg_raw() { # <chat> <silent 0|1> <html> -> prints message_id
   mid=$(jq -r '.result.message_id // empty' <<<"$out"); [ -n "$mid" ] || return 1; echo "$mid"
 }
 tg() { # tg <silent 0|1> <html> [state-key] -> prints message_id; spooled (re-sent later) when Telegram is unreachable
+  [ "$HEALTH_TG" = 1 ] || return 0                        # the standby is mute; this node speaks for it
   [ -n "${TG_BOT_TOKEN:-}" ] && [ -n "$2" ] || return 0
   local id mid; id=$(tg_chat) || return 0
   if mid=$(tg_raw "$id" "$1" "$2"); then echo "$mid"
   else printf '%s\t%s\t%s\t%s\n' "$NOW" "$1" "$(printf %s "$2" | base64 -w0)" "${3:-}" >> "$LIB/tg.spool"; fi
 }
-tg_edit() { # <message_id> <html> — turn the alert into its resolved state; fails if the message is gone/too old
+tg_edit() { # <message_id> <html> — rewrite an OPEN alert in place: resolved, or a second node joining it
+  [ "$HEALTH_TG" = 1 ] || return 0
   [ -n "${TG_BOT_TOKEN:-}" ] && [ -n "$1" ] || return 1
   local id; id=$(tg_chat) || return 1
   curl -s -m 8 -f -o /dev/null -X POST "$TG/editMessageText" -d chat_id="$id" -d message_id="$1" -d parse_mode=HTML \
@@ -78,25 +92,32 @@ flush_spool() {
   done < "$tmp"; rm -f "$tmp"
 }
 
-# ── state: one line per failing check  key ⇥ since ⇥ fails ⇥ alerted ⇥ msgid ⇥ what-was-wrong ────
-if [ -s "$STATE" ] && ! grep -q $'\t' "$STATE"; then awk -v n="$NOW" '{print $1"\t"n"\t2\t1\t-\t-"}' "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"; fi
-st_get() { awk -F'\t' -v k="$1" '$1==k{print $2"\t"$3"\t"$4"\t"$5"\t"$6; exit}' "$STATE"; }
+# ── state: key ⇥ since ⇥ fails ⇥ alerted ⇥ msgid ⇥ what-was-wrong ⇥ nodes named in the open alert ──
+if [ -s "$STATE" ] && ! grep -q $'\t' "$STATE"; then awk -v n="$NOW" '{print $1"\t"n"\t2\t1\t-\t-\t-"}' "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"; fi
+st_get() { awk -F'\t' -v k="$1" '$1==k{print $2"\t"$3"\t"$4"\t"$5"\t"$6"\t"$7; exit}' "$STATE"; }
 # "-" stands for an empty msgid / description: `read` with a tab IFS collapses empty fields and would shift them
-st_put() { awk -F'\t' -v k="$1" '$1!=k' "$STATE" > "$STATE.tmp"; printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "${5:--}" "${6:--}" >> "$STATE.tmp"; mv "$STATE.tmp" "$STATE"; }
+st_put() { awk -F'\t' -v k="$1" '$1!=k' "$STATE" > "$STATE.tmp"; printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "${5:--}" "${6:--}" "${7:--}" >> "$STATE.tmp"; mv "$STATE.tmp" "$STATE"; }
 st_del() { awk -F'\t' -v k="$1" '$1!=k' "$STATE" > "$STATE.tmp"; mv "$STATE.tmp" "$STATE"; }
 st_setmsg() { awk -F'\t' -v OFS='\t' -v k="$1" -v m="$2" '$1==k{$5=m}1' "$STATE" > "$STATE.tmp"; mv "$STATE.tmp" "$STATE"; }
 failing_keys() { awk -F'\t' '$4==1 && $1!~/^flap_/{print $1}' "$STATE"; }
-incident() { printf '%s\t%s\t%s\t%s\t%s\n' "$3" "$NOW" "$1" "$2" "${TITLE[$2]:-$2}" >> "$LIB/incidents.log"; }
+incident() { printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$3" "$NOW" "$1" "$2" "${DIGEST_T[$2]:-${TITLE[$2]:-$2}}" "${4:-}" "${5:-}" >> "$LIB/incidents.log"; }
 
 declare -A OK DETAILS
+# TITLE is what /status calls a check; DIGEST_T is how the morning summary says it happened
+declare -A DIGEST_T=([xhttp]="не работал основной путь" [tcp]="не работал резервный путь" [awg]="не работал AmneziaWG"
+  [nginx]="лежало сайт-прикрытие" [egress4]="не было интернета" [egress6]="не было IPv6" [mem]="заканчивалась память"
+  [cert14]="сертификат не продлевался" [cert3]="сертификат не продлевался" [selfsigned]="самоподписанный сертификат"
+  [disk]="заканчивался диск" [disk95]="заканчивался диск" [ru]="не работал вход через Россию"
+  [exit2]="не отвечал запасной выход" [sites]="не открывались сайты")
 declare -A TITLE=([xhttp]="основной путь" [tcp]="резервный путь" [awg]="AmneziaWG" [nginx]="сайт-прикрытие" [egress4]="нет интернета"
   [egress6]="IPv6" [cert14]="сертификат" [cert3]="сертификат" [selfsigned]="самоподписанный сертификат" [disk]="диск" [disk95]="диск"
   [mem]="память" [ru]="вход через Россию" [exit2]="запасной выход" [sites]="сайты")
 
-resolve() { # <key> <since> <msgid> <was> <sev>: edit the alert into "resolved"; send a new message if editing is impossible
+resolve() { # <key> <since> <msgid> <was> <sev> <nodes>: the SAME message becomes the resolved one
+  WHO=${6:-$NODE}
   local text; text="$("ok_$1")"$'\n'"$(timeline "$2")"; [ -n "$4" ] && text+=$'\n'"<i>Было: $4</i>"
   tg_edit "$3" "$text" || tg 1 "$text" >/dev/null
-  logl "OK   $1 after $(dur $((NOW-$2)))"; incident "$5" "$1" "$2"
+  logl "OK   $1 after $(dur $((NOW-$2)))"; incident "$5" "$1" "$2" "$WHO"
 }
 
 selfheal() { # <key> <label>: a restart fixed it — quiet, unless it keeps happening
@@ -111,30 +132,39 @@ selfheal() { # <key> <label>: a restart fixed it — quiet, unless it keeps happ
 }
 
 check() { # check <key> <crit|warn|info> <probe-fn> [fix-cmd] [fix-label]
-  # probe-fn sets DETAIL and returns 0/1; texts come from fail_<key> (uses $DETAIL $FIXNOTE $MIN) and ok_<key> (one line)
-  local key=$1 sev=$2 probe=$3 fix=${4:-} label=${5:-} since fails alerted msgid was healed=0
-  IFS=$'\t' read -r since fails alerted msgid was <<<"$(st_get "$key")"; since=${since:-0}; fails=${fails:-0}; alerted=${alerted:-0}
-  [ "${msgid:-}" = "-" ] && msgid=""; [ "${was:-}" = "-" ] && was=""
+  # probe-fn sets DETAIL and returns 0/1; texts come from fail_<key> (uses $WHO $DETAIL $FIXNOTE $MIN) and ok_<key>.
+  # An incident is one PROBLEM, not one server: it stays open while EITHER exit has this key failing, $WHO names
+  # whoever has it right now, and when the second exit joins or leaves, the message already sent is edited in
+  # place — never a second one. OK[] stays this node's own answer, because health.json describes this node.
+  local key=$1 sev=$2 probe=$3 fix=${4:-} label=${5:-} since fails alerted msgid was nodes healed=0 who
+  IFS=$'\t' read -r since fails alerted msgid was nodes <<<"$(st_get "$key")"
+  since=${since:-0}; fails=${fails:-0}; alerted=${alerted:-0}
+  [ "${msgid:-}" = "-" ] && msgid=""; [ "${was:-}" = "-" ] && was=""; [ "${nodes:-}" = "-" ] && nodes=""
   DETAIL=""; FIXNOTE=""
   if $probe; then healed=2
   elif [ -n "$fix" ]; then eval "$fix" >/dev/null 2>&1; sleep 5; $probe && healed=1; fi
-  if [ "$healed" -gt 0 ]; then
-    OK[$key]=1; DETAILS[$key]=$DETAIL
-    [ "$healed" = 1 ] && [ "$fails" = 0 ] && selfheal "$key" "$label"
+  if [ "$healed" -gt 0 ]; then OK[$key]=1; else OK[$key]=0; fi
+  DETAILS[$key]=$DETAIL
+  [ "$healed" = 1 ] && [ "$fails" = 0 ] && selfheal "$key" "$label"
+  who=""; [ "$healed" = 0 ] && who="$NODE"
+  [ -n "${ALSO[$key]:-}" ] && who="${who:+$who и }${ALSO[$key]}"
+  if [ -z "$who" ]; then
     if [ "$fails" -gt 0 ]; then
-      [ "$alerted" = 1 ] && resolve "$key" "$since" "${msgid:-}" "${was:-}" "$sev"
+      [ "$alerted" = 1 ] && resolve "$key" "$since" "${msgid:-}" "${was:-}" "$sev" "${nodes:-$NODE}"
       st_del "$key"
     fi
     return 0
   fi
-  [ -n "$fix" ] && FIXNOTE="Перезапустил $label — не помогло."
-  OK[$key]=0; DETAILS[$key]=$DETAIL
+  [ "$healed" = 0 ] && [ -n "$fix" ] && FIXNOTE="Перезапустил $label — не помогло."
   fails=$((fails+1)); [ "$since" -gt 0 ] || since=$NOW
+  WHO=$who; MIN=$(( (NOW-since)/60 )); [ "$MIN" -ge 1 ] || MIN=1
   if [ "$alerted" = 0 ] && [ "$fails" -ge 2 ]; then
-    MIN=$(( (NOW-since)/60 )); [ "$MIN" -ge 1 ] || MIN=1
-    msgid=$(tg "$(loud "$sev")" "$("fail_$key")" "$key"); alerted=1; was="$DETAIL${FIXNOTE:+ · $FIXNOTE}"; logl "FAIL $key $DETAIL"
+    msgid=$(tg "$(loud "$sev")" "$("fail_$key")"$'\n'"$RES" "$key"); alerted=1; was="$DETAIL${FIXNOTE:+ · $FIXNOTE}"
+    logl "FAIL $key ($who) $DETAIL"
+  elif [ "$alerted" = 1 ] && [ "$who" != "$nodes" ]; then
+    tg_edit "${msgid:-}" "$("fail_$key")"$'\n'"$RES" && logl "EDIT $key -> $who"
   fi
-  st_put "$key" "$since" "$fails" "$alerted" "${msgid:-}" "${was:-}"
+  st_put "$key" "$since" "$fails" "$alerted" "${msgid:-}" "${was:-}" "$who"
 }
 
 # ── facts gathered once per run ──────────────────────────────────────────────────────────────────
@@ -155,6 +185,9 @@ DISK_PCT=$(df --output=pcent / | tail -1 | tr -dc 0-9); DISK_FREE=$(df -h --outp
 MEM_TOTAL_K=$(awk '/MemTotal/{print $2}' /proc/meminfo); MEM_AVAIL_K=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
 MEM_PCT=$(( 100 - MEM_AVAIL_K*100/MEM_TOTAL_K )); MEM_FREE="$((MEM_AVAIL_K/1024)) МБ"; MEM_TOTAL="$((MEM_TOTAL_K/1024)) МБ"
 UP=$(cut -d. -f1 /proc/uptime)
+# every alert carries this line: the first question about a red message is always "was the box busy?"
+CPU_PCT=$(awk -v l="$(cut -d' ' -f1 /proc/loadavg)" -v n="$(nproc)" 'BEGIN{printf "%d", l*100/n}')
+RES="⚙️ CPU $CPU_PCT% · память $MEM_PCT% · диск $DISK_PCT% · аптайм $(dur "$UP")"
 # money is deliberately NOT monitored or shown: the Timeweb balance is the owner's business, not an alert
 
 # ── probes ───────────────────────────────────────────────────────────────────────────────────────
@@ -174,36 +207,121 @@ p_disk95()  { DETAIL="$DISK_PCT%"; [ "$DISK_PCT" -lt 95 ]; }
 p_mem()     { DETAIL="$MEM_PCT%"; [ "$MEM_PCT" -lt 92 ]; }
 
 # ── texts: fail_* = the alert, ok_* = one line, the resolved message adds the timeline itself ─────
-fail_xhttp()   { msg "🔴 <b>$NODE · основной путь не работает</b>" "XHTTP :443 не отвечает ($DETAIL) уже $MIN мин." "$FIXNOTE" "👥 Amnezia у всех не подключится. ClashMi сам уйдёт на резервный путь." "→ <code>journalctl -u xray -n 50</code>"; }
-ok_xhttp()     { echo "🟢 <b>$NODE · основной путь снова работает</b>"; }
-fail_tcp()     { msg "🟠 <b>$NODE · резервный путь не работает</b>" "TCP :$TCP_PORT не отдаёт сертификат $FALLBACK_SNI уже $MIN мин." "$FIXNOTE" "👥 Основной путь работает, люди не заметят."; }
-ok_tcp()       { echo "🟢 <b>$NODE · резервный путь снова работает</b>"; }
-fail_awg()     { msg "🟠 <b>$NODE · AmneziaWG не работает</b>" "Интерфейс awg0 не поднят уже $MIN мин." "$FIXNOTE" "👥 Кто на AmneziaWG — переключись на основной ключ или ClashMi."; }
-ok_awg()       { echo "🟢 <b>$NODE · AmneziaWG снова работает</b>"; }
-fail_nginx()   { msg "🟠 <b>$NODE · сайт-прикрытие не работает</b>" "nginx остановлен уже $MIN мин, REALITY на :443 начнёт отваливаться." "$FIXNOTE"; }
-ok_nginx()     { echo "🟢 <b>$NODE · сайт-прикрытие снова работает</b>"; }
-fail_egress4() { msg "🔴 <b>$NODE · нет интернета с сервера</b>" "IPv4 не выходит в сеть уже $MIN мин." "👥 Не работает ничего. Вход через Россию уйдёт на запасной выход, если он есть." "→ панель Timeweb: состояние сервера и сети."; }
-ok_egress4()   { echo "🟢 <b>$NODE · интернет вернулся</b>"; }
-fail_egress6() { msg "🟡 <b>$NODE · IPv6 не выходит в сеть</b>" "Не критично: люди ходят по IPv4."; }
-ok_egress6()   { echo "🟢 <b>$NODE · IPv6 снова работает</b>"; }
-fail_cert14()  { msg "🟡 <b>$NODE · сертификат истекает через $CERT_DAYS дн.</b>" "certbot не продлил. Проверь: $DOMAIN → ${SERVER_IP:-этот сервер} без прокси, порт 80 открыт."; }
-ok_cert14()    { echo "🟢 <b>$NODE · сертификат продлён до $(rudate "$CERT_END")</b>"; }
-fail_cert3()   { msg "🔴 <b>$NODE · основной путь сломается через $CERT_DAYS дн.</b>" "Сертификат $DOMAIN не продлевается." "→ <code>certbot renew</code> руками и смотреть ошибку."; }
-ok_cert3()     { echo "🟢 <b>$NODE · сертификат продлён до $(rudate "$CERT_END")</b>"; }
-fail_selfsigned() { msg "🟡 <b>$NODE · работаем на самоподписанном сертификате</b>" "Подписка ClashMi и часть XHTTP-клиентов не заработают." "→ направь DNS $DOMAIN на ${SERVER_IP:-этот сервер}; install.sh повторяет попытку сам каждые 10 мин."; }
-ok_selfsigned() { echo "🟢 <b>$NODE · получен сертификат Let's Encrypt</b>"; }
-fail_disk()    { msg "🟡 <b>$NODE · диск заполнен на $DISK_PCT%</b>" "Свободно $DISK_FREE." "→ <code>journalctl --vacuum-size=200M</code>, <code>apt clean</code>"; }
-ok_disk()      { echo "🟢 <b>$NODE · диск освободился, занято $DISK_PCT%</b>"; }
-fail_disk95()  { msg "🔴 <b>$NODE · диск почти полон: $DISK_PCT%</b>" "Свободно $DISK_FREE, скоро перестанут писаться логи и подписки." "→ <code>journalctl --vacuum-size=200M</code>, <code>apt clean</code>, <code>du -xsh /var/* | sort -h</code>"; }
-ok_disk95()    { echo "🟢 <b>$NODE · диск освободился, занято $DISK_PCT%</b>"; }
-fail_mem()     { msg "🟠 <b>$NODE · память почти закончилась</b>" "Свободно $MEM_FREE из $MEM_TOTAL, xray может убить OOM." "→ <code>systemctl restart xray</code>, если станет хуже."; }
-ok_mem()       { echo "🟢 <b>$NODE · память в норме, занято $MEM_PCT%</b>"; }
-fail_ru()      { msg "🟠 <b>Москва · вход через Россию не работает</b>" ":443 на $RU_HOST не отвечает ($DETAIL) уже $MIN мин." "$FIXNOTE" "👥 Кто на ключе «Россия» — переключись на Амстердам напрямую. ClashMi переключится сам."; }
+fail_xhttp()   { msg "🔴 <b>$WHO · основной путь не работает</b>" "🔌 XHTTP :443 не отвечает ($DETAIL) уже $MIN мин." "${FIXNOTE:+🔧 $FIXNOTE}" "👥 Amnezia у всех не подключится. ClashMi сам уйдёт на резервный путь." "→ <code>journalctl -u xray -n 50</code>"; }
+ok_xhttp()     { echo "🟢 <b>$WHO · основной путь снова работает</b>"; }
+fail_tcp()     { msg "🟠 <b>$WHO · резервный путь не работает</b>" "🔌 TCP :$TCP_PORT не отдаёт сертификат $FALLBACK_SNI уже $MIN мин." "${FIXNOTE:+🔧 $FIXNOTE}" "👥 Основной путь работает, люди не заметят."; }
+ok_tcp()       { echo "🟢 <b>$WHO · резервный путь снова работает</b>"; }
+fail_awg()     { msg "🟠 <b>$WHO · AmneziaWG не работает</b>" "🔌 Интерфейс awg0 не поднят уже $MIN мин." "${FIXNOTE:+🔧 $FIXNOTE}" "👥 Кто на AmneziaWG — переключись на основной ключ или ClashMi."; }
+ok_awg()       { echo "🟢 <b>$WHO · AmneziaWG снова работает</b>"; }
+fail_nginx()   { msg "🟠 <b>$WHO · сайт-прикрытие не работает</b>" "🔌 nginx остановлен уже $MIN мин, REALITY на :443 начнёт отваливаться." "${FIXNOTE:+🔧 $FIXNOTE}"; }
+ok_nginx()     { echo "🟢 <b>$WHO · сайт-прикрытие снова работает</b>"; }
+fail_egress4() { msg "🔴 <b>$WHO · нет интернета с сервера</b>" "🌐 IPv4 не выходит в сеть уже $MIN мин." "👥 Не работает ничего. Вход через Россию уйдёт на запасной выход, если он есть." "→ панель Timeweb: состояние сервера и сети."; }
+ok_egress4()   { echo "🟢 <b>$WHO · интернет вернулся</b>"; }
+fail_egress6() { msg "🟡 <b>$WHO · IPv6 не выходит в сеть</b>" "🌐 Не критично: люди ходят по IPv4."; }
+ok_egress6()   { echo "🟢 <b>$WHO · IPv6 снова работает</b>"; }
+fail_cert14()  { msg "🟡 <b>$WHO · сертификат истекает через $CERT_DAYS дн.</b>" "🔒 certbot не продлил. Проверь: $DOMAIN → ${SERVER_IP:-этот сервер} без прокси, порт 80 открыт."; }
+ok_cert14()    { echo "🟢 <b>$WHO · сертификат продлён до $(rudate "$CERT_END")</b>"; }
+fail_cert3()   { msg "🔴 <b>$WHO · основной путь сломается через $CERT_DAYS дн.</b>" "🔒 Сертификат $DOMAIN не продлевается." "→ <code>certbot renew</code> руками и смотреть ошибку."; }
+ok_cert3()     { echo "🟢 <b>$WHO · сертификат продлён до $(rudate "$CERT_END")</b>"; }
+fail_selfsigned() { msg "🟡 <b>$WHO · работаем на самоподписанном сертификате</b>" "🔒 Подписка ClashMi и часть XHTTP-клиентов не заработают." "→ направь DNS $DOMAIN на ${SERVER_IP:-этот сервер}; install.sh повторяет попытку сам каждые 10 мин."; }
+ok_selfsigned() { echo "🟢 <b>$WHO · получен сертификат Let's Encrypt</b>"; }
+fail_disk()    { msg "🟡 <b>$WHO · диск заполнен на $DISK_PCT%</b>" "💾 Свободно $DISK_FREE." "→ <code>journalctl --vacuum-size=200M</code>, <code>apt clean</code>"; }
+ok_disk()      { echo "🟢 <b>$WHO · диск освободился, занято $DISK_PCT%</b>"; }
+fail_disk95()  { msg "🔴 <b>$WHO · диск почти полон: $DISK_PCT%</b>" "💾 Свободно $DISK_FREE, скоро перестанут писаться логи и подписки." "→ <code>journalctl --vacuum-size=200M</code>, <code>apt clean</code>, <code>du -xsh /var/* | sort -h</code>"; }
+ok_disk95()    { echo "🟢 <b>$WHO · диск освободился, занято $DISK_PCT%</b>"; }
+fail_mem()     { msg "🟠 <b>$WHO · память почти закончилась</b>" "🧠 Свободно $MEM_FREE из $MEM_TOTAL, xray может убить OOM." "→ <code>systemctl restart xray</code>, если станет хуже."; }
+ok_mem()       { echo "🟢 <b>$WHO · память в норме, занято $MEM_PCT%</b>"; }
+fail_ru()      { msg "🟠 <b>Москва · вход через Россию не работает</b>" "🔌 :443 на $RU_HOST не отвечает ($DETAIL) уже $MIN мин." "${FIXNOTE:+🔧 $FIXNOTE}" "👥 Кто на ключе «Россия» — переключись на Амстердам напрямую. ClashMi переключится сам."; }
 ok_ru()        { echo "🟢 <b>Москва · вход через Россию снова работает</b>"; }
-fail_exit2()   { msg "🟡 <b>Запасной выход не отвечает</b>" "$EXIT2_DOMAIN :443 ($DETAIL) уже $MIN мин." "$FIXNOTE" "Основной работает, резерва сейчас нет."; }
+fail_exit2()   { msg "🟡 <b>Запасной выход не отвечает</b>" "🔌 $EXIT2_DOMAIN :443 ($DETAIL) уже $MIN мин." "${FIXNOTE:+🔧 $FIXNOTE}" "Основной работает, резерва сейчас нет."; }
 ok_exit2()     { echo "🟢 <b>Запасной выход снова в строю</b>"; }
 
+# ── what the standby found about itself ─────────────────────────────────────────────────────────
+# It is mute, so its health.json is how it reports. Anything failing there joins this node's incident for
+# the same key. "ru" and "exit2" are skipped: those name a specific OTHER node, not the pair, and the
+# standby's copy of them would put the wrong name in the text.
+if [ -n "${EXIT2_HOST:-}" ] && [ "$HEALTH_TG" = 1 ] && [ -z "$PREVIEW" ]; then
+  x2=$(ssh -o BatchMode=yes -o ConnectTimeout=8 "root@$EXIT2_HOST" cat "$LIB/health.json" 2>/dev/null || true)
+  if [ -n "$x2" ] && jq -e . >/dev/null 2>&1 <<<"$x2"; then
+    x2ts=$(jq -r '.ts // 0' <<<"$x2")
+    # a stale file means the standby stopped running; the exit2 probe is what reports that, not this
+    if [ $((NOW - x2ts)) -lt 600 ]; then
+      X2_DISK=$(jq -r '.disk_pct // empty' <<<"$x2")
+      X2_DOWN=$(jq -r '(.sites.down // []) | join(" ")' <<<"$x2")
+      for k in $(jq -r '.checks | to_entries[] | select(.value.ok == false) | .key' <<<"$x2"); do
+        case $k in ru|exit2) continue;; esac; ALSO[$k]="$EXIT2_NAME"
+      done
+    fi
+  fi
+fi
+
+# ── renderers, defined above the run so --preview can reach them ─────────────────────────────────
+site_name() { case $1 in www.youtube.com) echo YouTube;; www.google.com) echo Google;; www.instagram.com) echo Instagram;; web.telegram.org) echo Telegram;;
+  chatgpt.com) echo ChatGPT;; x.com) echo X;; www.facebook.com) echo Facebook;; discord.com) echo Discord;; www.tiktok.com) echo TikTok;;
+  web.whatsapp.com) echo WhatsApp;; github.com) echo GitHub;; www.netflix.com) echo Netflix;; *) echo "$1";; esac; }
+names() { local o="" s; for s in "$@"; do o="$o, $(site_name "$s")"; done; echo "${o#, }"; }
+sites_who() {  # which exit could not open what: one incident naming both addresses, never two alerts
+  if [ -n "$DOWN" ] && [ "$DOWN" = "$X2_DOWN" ]; then echo "🌐 Не открывается ни с $NODE_GEN, ни с $EXIT2_GEN: $(names $DOWN)."
+  elif [ -n "$DOWN" ] && [ -n "$X2_DOWN" ]; then echo "🌐 С $NODE_GEN: $(names $DOWN). С $EXIT2_GEN: $(names $X2_DOWN)."
+  elif [ -n "$DOWN" ]; then echo "🌐 Не открывается с $NODE_GEN: $(names $DOWN)."
+  else echo "🌐 Не открывается с $EXIT2_GEN: $(names $X2_DOWN)."; fi
+}
+sites_nodes() { local w=""; [ -n "$DOWN" ] && w="$NODE"; [ -n "$X2_DOWN" ] && w="${w:+$w и }$EXIT2_NAME"; echo "$w"; }
+sites_text() { msg "🟠 <b>$(verb "$NDOWN" "не открывается" "не открываются") $(plural "$NDOWN" сайт сайта сайтов) из $TOTAL</b>" \
+                   "$(sites_who)" "Держится два прогона подряд. Если часами — адрес в чёрном списке сервиса: /newip."; }
+
+online24() {
+  { journalctl -u xray --since -24h -o cat 2>/dev/null | grep -oP 'email: \K\S+'
+    local -A m; local f pub name; for f in "$ETC"/peers/*.env; do [ -f "$f" ] || continue; pub=$(sed -n 's/^PEER_PUB=//p' "$f"); name=$(sed -n 's/^PEER_NAME=//p' "$f"); m[$pub]=$name; done
+    awg show awg0 latest-handshakes 2>/dev/null | while read -r pub ts; do [ "${ts:-0}" -gt $((NOW-86400)) ] 2>/dev/null && echo "${m[$pub]:-}"; done
+  } | grep . | grep -vx relay-ru | sort -u | paste -sd, | sed 's/,/, /g'
+}
+
+digest() {  # ONE silent message for every node: whatever did not deserve a sound during the day lands here
+  local inc n lines=() s e sev key title inodes f a _ nodes online facts
+  inc=$(awk -F'\t' -v t=$((NOW-86400)) '$2>t' "$LIB/incidents.log" 2>/dev/null || true); n=$(printf '%s' "$inc" | grep -c . || true)
+  if [ "$n" = 0 ] && [ -z "$(failing_keys)" ]; then lines+=("☀️ <b>$BRAND</b> · сутки без происшествий")
+  else
+    lines+=("☀️ <b>$BRAND</b> · $(plural "$n" инцидент инцидента инцидентов) за сутки")
+    while IFS=$'\t' read -r s e sev key title inodes idet; do [ -n "$s" ] || continue
+      lines+=("$(emo "$sev") $(when "$s") · ${DIGEST_T[$key]:-$title}${idet:+ ($idet)}, $(dur $((e-s)))${inodes:+ · $inodes}"); done <<<"$inc"
+    while IFS=$'\t' read -r key s f a _ _ nodes; do [ "$a" = 1 ] || continue; case $key in flap_*) continue;; esac
+      lines+=("⏳ ${TITLE[$key]:-$key} не работает с $(when "$s")${nodes:+ · $nodes}"); done < "$STATE"
+  fi
+  nodes="$FLAG $NODE"; [ -n "${EXIT2_HOST:-}" ] && nodes="$nodes · 🛟 $EXIT2_NAME"; [ -n "${RU_HOST:-}" ] && nodes="$nodes · 🇷🇺 Москва"
+  lines+=("$nodes — $( [ -z "$(failing_keys)" ] && echo 'в порядке' || echo 'см. /status')")
+  facts="🌐 $((TOTAL-NDOWN))/$TOTAL · 🔒 $CERT_DAYS дн. · 💾 $DISK_PCT%"; [ -n "$X2_DISK" ] && facts="$facts и $X2_DISK%"
+  lines+=("$facts")
+  online=$(online24); [ -n "$online" ] && lines+=("👥 $online")
+  tg 1 "$(printf '%s\n' "${lines[@]}")" >/dev/null; logl "DIGEST sent"
+}
+
+# ── --preview <chat>: every shape a message can take, with made-up data, into one chat ───────────
+# There is no way to rehearse an outage on a live server, and wording is the whole point of these
+# messages, so this renders them on demand instead.
+preview_send() {
+  # Sends TWO messages and then rewrites each of them three times, which is what an incident actually does:
+  # one message appears, gains the second node, loses it, and finally turns into the resolved line. Showing
+  # each shape as its own message (the first version of this) read as if the alerts were duplicating.
+  local t=$'\n'"<i>— тест, ничего не сломалось</i>" a b pause=7
+  TOTAL=$(echo $SERVICES | wc -w); MIN=2; DETAIL="HTTP 000"; FIXNOTE=""
+  WHO="$NODE"; a=$(tg 1 "$(fail_xhttp)"$'\n'"$RES$t")
+  DOWN="www.netflix.com"; X2_DOWN=""; NDOWN=1; b=$(tg 1 "$(sites_text)$t")
+  sleep $pause                                   # the standby joins both incidents
+  MIN=4; FIXNOTE="Перезапустил xray — не помогло."; WHO="$NODE и $EXIT2_NAME"
+  tg_edit "$a" "$(fail_xhttp)"$'\n'"$RES$t"
+  X2_DOWN="www.netflix.com"; tg_edit "$b" "$(sites_text)$t"
+  sleep $pause                                   # the two exits now differ
+  X2_DOWN="x.com"; NDOWN=2; tg_edit "$b" "$(sites_text)$t"
+  sleep $pause                                   # both recover: the same two messages become the report
+  tg_edit "$a" "$(ok_xhttp)"$'\n'"$(timeline $((NOW-360)))"$'\n'"<i>Было: HTTP 000 · Перезапустил xray — не помогло.</i>$t"
+  tg_edit "$b" "$(msg "🟢 <b>все $TOTAL сайтов снова открываются</b>" "$(timeline $((NOW-360)))" "<i>Не открывались: Netflix, X</i>")$t"
+  DOWN=""; X2_DOWN=""; NDOWN=0; X2_DISK=${X2_DISK:-20}; digest
+  echo "preview -> $PREVIEW: два сообщения, каждое правится на месте, плюс дайджест"
+}
+
 # ── run ──────────────────────────────────────────────────────────────────────────────────────────
+[ -n "$PREVIEW" ] && { preview_send; exit 0; }
 flush_spool
 check xhttp   crit p_xhttp   "systemctl restart xray" xray
 check tcp     warn p_tcp     "systemctl restart xray" xray
@@ -220,29 +338,35 @@ check mem     warn p_mem
 [ -n "${RU_HOST:-}" ]   && check ru    warn p_ru    "ssh -o BatchMode=yes -o ConnectTimeout=10 root@$RU_HOST systemctl restart xray" "xray на Москве"
 [ -n "${EXIT2_HOST:-}" ] && check exit2 info p_exit2 "ssh -o BatchMode=yes -o ConnectTimeout=10 root@$EXIT2_HOST systemctl restart xray" "xray на запасном"
 
-# popular sites from here — grouped, alert only when the set is stable for 2 runs; recovery edits the alert
-site_name() { case $1 in www.youtube.com) echo YouTube;; www.google.com) echo Google;; www.instagram.com) echo Instagram;; web.telegram.org) echo Telegram;;
-  chatgpt.com) echo ChatGPT;; x.com) echo X;; www.facebook.com) echo Facebook;; discord.com) echo Discord;; www.tiktok.com) echo TikTok;;
-  web.whatsapp.com) echo WhatsApp;; github.com) echo GitHub;; www.netflix.com) echo Netflix;; *) echo "$1";; esac; }
-names() { local o="" s; for s in "$@"; do o="$o, $(site_name "$s")"; done; echo "${o#, }"; }
+# popular sites from BOTH exits — one incident for the pair: alert once the set is stable for two runs,
+# edit that same message when the other exit joins or drops out, edit it again into the resolved state
 tmpd=$(mktemp -d)
 for s in $SERVICES; do ( c=$(curl -s -o /dev/null -m 8 -w '%{http_code}' "https://$s/" || true); [ "$c" = 000 ] && echo "$s" > "$tmpd/$s" ) & done; wait
 DOWN=$(ls "$tmpd" 2>/dev/null | sort | tr '\n' ' ' | sed 's/ $//'); rm -rf "$tmpd"
-TOTAL=$(echo $SERVICES | wc -w); NDOWN=$(echo $DOWN | wc -w)
+TOTAL=$(echo $SERVICES | wc -w)
+BOTH=$(printf '%s %s' "$DOWN" "$X2_DOWN" | tr ' ' '
+' | grep . | sort -u | tr '
+' ' ' | sed 's/ $//')
+NDOWN=$(echo $BOTH | wc -w)
 last=$(cat "$LIB/services.last" 2>/dev/null || true); alerted=$(cat "$LIB/services.alerted" 2>/dev/null || true)
-echo "$DOWN" > "$LIB/services.last"
-if [ "$DOWN" = "$last" ] && [ "$DOWN" != "$alerted" ]; then
-  if [ -n "$DOWN" ]; then
+echo "$BOTH" > "$LIB/services.last"
+if [ "$BOTH" = "$last" ] && [ "$BOTH" != "$alerted" ]; then
+  if [ -n "$BOTH" ]; then
     [ -n "$alerted" ] || echo "$NOW" > "$LIB/services.since"
-    mid=$(tg 0 "$(msg "🟠 <b>$NODE · не открываются $(plural "$NDOWN" сайт сайта сайтов) из $TOTAL</b>" "$(names $DOWN) не отвечают с нашего IP два прогона подряд." "Если держится часами — IP в чёрном списке сервиса: /newip.")")
-    [ -n "$mid" ] && echo "$mid" > "$LIB/services.msgid"; logl "SITES DOWN $DOWN"
+    if [ -n "$alerted" ] && [ -s "$LIB/services.msgid" ] && tg_edit "$(cat "$LIB/services.msgid")" "$(sites_text)"; then
+      logl "SITES EDIT $BOTH"
+    else
+      mid=$(tg 0 "$(sites_text)"); [ -n "$mid" ] && echo "$mid" > "$LIB/services.msgid"; logl "SITES DOWN $BOTH"
+    fi
+    sites_nodes > "$LIB/services.who"
   else
     since=$(cat "$LIB/services.since" 2>/dev/null || echo "$NOW")
-    text=$(msg "🟢 <b>$NODE · все $TOTAL сайтов снова открываются</b>" "$(timeline "$since")" "<i>Не открывались: $(names $alerted)</i>")
+    text=$(msg "🟢 <b>все $TOTAL сайтов снова открываются</b>" "$(timeline "$since")" "<i>Не открывались: $(names $alerted)</i>")
     tg_edit "$(cat "$LIB/services.msgid" 2>/dev/null)" "$text" || tg 1 "$text" >/dev/null
-    rm -f "$LIB/services.msgid"; incident warn sites "$since"; logl "SITES OK"
+    incident warn sites "$since" "$(cat "$LIB/services.who" 2>/dev/null || true)" "$(names $alerted)"
+    rm -f "$LIB/services.msgid" "$LIB/services.who"; logl "SITES OK"
   fi
-  echo "$DOWN" > "$LIB/services.alerted"
+  echo "$BOTH" > "$LIB/services.alerted"
 fi
 
 # reboot notice (🔵, silent) — once per boot, not on the very first run after install
@@ -272,27 +396,6 @@ INC24=$(awk -F'\t' -v t=$((NOW-86400)) '$2>t' "$LIB/incidents.log" 2>/dev/null |
   > "$LIB/health.json.tmp" 2>/dev/null && mv "$LIB/health.json.tmp" "$LIB/health.json"
 
 # ☀️ daily digest at 09:00 MSK — everything that did not deserve a sound goes here
-online24() {
-  { journalctl -u xray --since -24h -o cat 2>/dev/null | grep -oP 'email: \K\S+'
-    local -A m; local f pub name; for f in "$ETC"/peers/*.env; do [ -f "$f" ] || continue; pub=$(sed -n 's/^PEER_PUB=//p' "$f"); name=$(sed -n 's/^PEER_NAME=//p' "$f"); m[$pub]=$name; done
-    awg show awg0 latest-handshakes 2>/dev/null | while read -r pub ts; do [ "${ts:-0}" -gt $((NOW-86400)) ] 2>/dev/null && echo "${m[$pub]:-}"; done
-  } | grep . | sort -u | paste -sd, | sed 's/,/, /g'
-}
-digest() {
-  local inc n lines=() s e sev key title f a _ nodes online
-  inc=$(awk -F'\t' -v t=$((NOW-86400)) '$2>t' "$LIB/incidents.log" 2>/dev/null || true); n=$(printf '%s' "$inc" | grep -c . || true)
-  if [ "$n" = 0 ] && [ -z "$(failing_keys)" ]; then lines+=("☀️ <b>$BRAND</b> · за сутки без инцидентов")
-  else
-    lines+=("☀️ <b>$BRAND</b> · $(plural "$n" инцидент инцидента инцидентов) за сутки")
-    while IFS=$'\t' read -r s e sev key title; do [ -n "$s" ] || continue; lines+=("$(emo "$sev") $(when "$s") $title, $(dur $((e-s)))"); done <<<"$inc"
-    while IFS=$'\t' read -r key s f a _ _; do [ "$a" = 1 ] || continue; case $key in flap_*) continue;; esac; lines+=("⏳ ${TITLE[$key]:-$key} — всё ещё не работает, с $(when "$s")"); done < "$STATE"
-  fi
-  nodes="$FLAG $NODE"; [ -n "${RU_HOST:-}" ] && nodes="$nodes · 🇷🇺 Москва"; [ -n "${EXIT2_HOST:-}" ] && nodes="$nodes · 🛟 Запасной"
-  lines+=("$nodes — $( [ -z "$(failing_keys)" ] && echo 'в порядке' || echo 'есть проблемы, см. /status')")
-  lines+=("🌐 $((TOTAL-NDOWN)) из $TOTAL сайтов · 🔒 сертификат $CERT_DAYS дн. · 💾 диск $DISK_PCT%")
-  online=$(online24); [ -n "$online" ] && lines+=("👥 Были в сети: $online")
-  tg 1 "$(printf '%s\n' "${lines[@]}")" >/dev/null; logl "DIGEST sent"
-}
 if [ "$(TZ=Europe/Moscow date +%H)" = 09 ] && [ "$(cat "$LIB/digest.date" 2>/dev/null)" != "$TODAY" ]; then echo "$TODAY" > "$LIB/digest.date"; digest; fi
 
 logl "checked, failing=$(failing_keys | wc -l)${DOWN:+, sites down: $DOWN}"

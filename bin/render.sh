@@ -59,17 +59,20 @@ if [ -d /etc/fail2ban ]; then
   install -m644 "$tf2b" /etc/fail2ban/jail.d/safechill.local
   systemctl reload fail2ban 2>/dev/null || systemctl restart fail2ban 2>/dev/null || true
 fi
+install -m755 "$TPL/vpn-health.sh" /usr/local/bin/vpn-health.sh 2>/dev/null || true
 echo "rendered this node: $n_users users (+relay), $n_peers awg peers, egress $EGRESS_STRATEGY"
 
 # -- standby exit (optional): same users/peers, rendered there ---------------------
 if [ -n "${EXIT2_HOST:-}" ]; then
   # the templates go too: the standby renders from its own copy, so without this it quietly keeps serving
-  # whatever it was installed with — its xray stayed at loglevel=warning for exactly that reason.
+  # whatever it was installed with — its xray stayed at loglevel=warning for exactly that reason, and its
+  # vpn-health.sh stayed on the version from install day, sending a second copy of every alert.
+  # HEALTH_TG=0 is set here, not in the template: only one of the two exits may talk to Telegram.
   if scp "${SSHOPT[@]}" -q "$ETC/users.json" "root@$EXIT2_HOST:/etc/safechill/users.json" \
      && scp "${SSHOPT[@]}" -q -r "$ETC/peers" "root@$EXIT2_HOST:/etc/safechill/" \
      && scp "${SSHOPT[@]}" -q -r "$TPL" "root@$EXIT2_HOST:/usr/local/share/safechill/templates.new" \
      && scp "${SSHOPT[@]}" -q "$tf2b" "root@$EXIT2_HOST:/tmp/safechill-f2b.local" \
-     && ssh "${SSHOPT[@]}" "root@$EXIT2_HOST" "rm -rf /usr/local/share/safechill/templates && mv /usr/local/share/safechill/templates.new /usr/local/share/safechill/templates && install -d /etc/systemd/journald.conf.d && install -m644 /usr/local/share/safechill/templates/journald-99-safechill.conf /etc/systemd/journald.conf.d/99-safechill.conf && systemctl restart systemd-journald && render.sh >/dev/null && { if [ -d /etc/fail2ban ]; then install -d /etc/fail2ban/jail.d && install -m644 /tmp/safechill-f2b.local /etc/fail2ban/jail.d/safechill.local && { systemctl reload fail2ban 2>/dev/null || true; }; fi; } && systemctl restart xray && (awg syncconf awg0 <(awg-quick strip awg0) 2>/dev/null || systemctl restart awg-quick@awg0)"; then
+     && ssh "${SSHOPT[@]}" "root@$EXIT2_HOST" "rm -rf /usr/local/share/safechill/templates && mv /usr/local/share/safechill/templates.new /usr/local/share/safechill/templates && install -d /etc/systemd/journald.conf.d && install -m644 /usr/local/share/safechill/templates/journald-99-safechill.conf /etc/systemd/journald.conf.d/99-safechill.conf && systemctl restart systemd-journald && render.sh >/dev/null && { if [ -d /etc/fail2ban ]; then install -d /etc/fail2ban/jail.d && install -m644 /tmp/safechill-f2b.local /etc/fail2ban/jail.d/safechill.local && { systemctl reload fail2ban 2>/dev/null || true; }; fi; } && sed -i '/^HEALTH_TG=/d' /etc/safechill/vpn.env && echo HEALTH_TG=0 >> /etc/safechill/vpn.env && systemctl restart xray && (awg syncconf awg0 <(awg-quick strip awg0) 2>/dev/null || systemctl restart awg-quick@awg0)"; then
     echo "synced standby exit $EXIT2_HOST ($n_users users, $n_peers peers)"
   else
     echo "WARNING: could not sync standby exit $EXIT2_HOST (unreachable?)" >&2

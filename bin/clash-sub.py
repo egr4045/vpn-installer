@@ -136,9 +136,10 @@ def main():
         # dns.google are throttled, and each first visit to a domain waits out that timeout. With it they
         # ride the tunnel, while a .ru name is answered DIRECT by a Russian resolver — so Russian CDNs
         # still return their nearest cache and not one chosen for Amsterdam.
-        # 198.19 and not 198.18: ClashMi puts its own TUN interface on 198.18.0.1/30, and a fake IP handed
-        # out from inside that subnet is answered by the interface instead of being routed anywhere.
-        "dns": {"enable": True, "ipv6": True, "enhanced-mode": "fake-ip", "fake-ip-range": "198.19.0.1/16",
+        # 198.18 and not 198.19: ClashMi puts its own TUN interface on 198.19.0.1/30, and a fake IP handed
+        # out from inside that subnet is answered by the interface instead of being routed anywhere. The
+        # two must not overlap, and it is the pool that has to move — the interface address is the app's.
+        "dns": {"enable": True, "ipv6": True, "enhanced-mode": "fake-ip", "fake-ip-range": "198.18.0.1/16",
                 "fake-ip-filter": ["*.lan", "*.local", "localhost.ptlogin2.qq.com", "+.msftconnecttest.com", "+.msftncsi.com", "+.pool.ntp.org"],
                 "respect-rules": True,
                 "default-nameserver": ["77.88.8.8", "1.1.1.1", "8.8.8.8"],
