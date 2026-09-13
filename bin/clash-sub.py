@@ -7,8 +7,12 @@ Works in ClashMi, Clash Verge Rev, FlClash, Clash Meta for Android (mihomo >= 1.
 
 Served by nginx as https://DOMAIN/c/<token> (behind the REALITY steal on :443).
 Writes /root/clients/<name>/clash.txt (URL) and clash.png (QR).
+
+Also writes the gaming variant https://DOMAIN/c/<token>-game (clash-game.txt / clash-game.png): the same
+profile plus a "🎮 Игра" group that sends the game process out through AmneziaWG — see GAME_PROCESS below.
+`clash-sub.py <name> --game-only` writes just that file and leaves the main profile untouched.
 """
-import json, pathlib, subprocess, sys
+import copy, json, pathlib, subprocess, sys
 try:
     import yaml
 except ImportError:  # JSON is valid YAML; mihomo reads it fine
@@ -56,6 +60,20 @@ DIRECT_PROCESS = [
     "deluge.exe", "deluged.exe", "tixati.exe", "Vuze.exe", "aria2c.exe",
     "qbittorrent", "transmission-qt", "transmission-daemon", "deluge", "deluged", "aria2c",
 ]
+
+# The gaming profile. WARDOGS (UE5) talks to its match server over UDP. Through XHTTP that UDP rides
+# inside an HTTP/2 stream on TCP, so one lost segment stalls every packet queued behind it — and via the
+# Moscow entry it does so on two TCP legs (home -> RU, RU -> NL), sharing the xmux connection with
+# whatever else the machine is doing. Measured from the owner's desk 2026-09-12: AWG to Amsterdam 38 ms
+# and native UDP; the relay 54 ms to Moscow plus 40 ms to Amsterdam plus retransmit stalls. So the game
+# process leaves through AmneziaWG and everything else behaves exactly as in the main profile. It is a
+# separate file and URL on purpose: the person switches profiles in ClashMi to play and back afterwards,
+# and the main profile never changes under anyone. The domains are a backstop for a client that cannot
+# match by process (mobile, or find-process-mode off); on Windows the process rule fires first.
+GAME_SUFFIX = "-game"
+GAME_PROCESS = ["WardogsClient-Win64-Shipping.exe", "WardogsLauncher-Shipping.exe"]
+GAME_DOMAINS = ["pragmaengine.com", "bulkhead.net", "wardogs.com", "vivox.com", "epicgames.dev",
+                "anybrain.gg", "elytra.ac"]
 
 def load_env(p):
     env = {}
@@ -181,21 +199,48 @@ def main():
             "GEOIP,RU,DIRECT", f"MATCH,🔐 {brand}",
         ],
     }
+    # Gaming variant: one extra fallback group, first in line after the selector so it is visible on
+    # the Proxy screen, and its rules ahead of everything else. AWG first (two exits), then XHTTP straight
+    # to Amsterdam without the Moscow hop, then whatever "Авто" is doing — never a dead end when UDP to
+    # the exit is filtered, which some networks do. A 60 s probe, because a game notices a dead path
+    # long before a browser would.
+    GAME = "🎮 Игра"
+    game = copy.deepcopy(cfg)
+    # Its own AmneziaWG key when peers/<name>-game.env exists. The exit's kernel keeps ONE session per
+    # key: when the phone (main profile, idle, keepalive every 25 s, rekey every ~2 min) completes a
+    # handshake, the PC's session on the same key is displaced and the PC hears nothing until it
+    # re-handshakes — 6–12 s of silence every 1–3 min, measured 2026-09-13 with the endpoint flipping
+    # between two source ports. A person gaming on the PC and carrying the phone is the normal case.
+    PG = load_env(ETC / "peers" / f"{name}-game.env") if (ETC / "peers" / f"{name}-game.env").exists() else P
+    if PG is not P:
+        for pr in game["proxies"]:
+            if pr["type"] == "wireguard":
+                pr.update({"ip": f"{net4}.{PG['PEER_N']}", "private-key": PG["PEER_PRIV"], "pre-shared-key": PG["PEER_PSK"]})
+    game["proxy-groups"].insert(1, {"name": GAME, "type": "fallback",
+                                    "proxies": awg_order + [n for n in spare_order if "IPv6" not in n] + [AUTO],
+                                    **{**probe, "interval": 60}})
+    game["rules"] = [f"PROCESS-NAME,{p},{GAME}" for p in GAME_PROCESS] + [f"DOMAIN-SUFFIX,{d},{GAME}" for d in GAME_DOMAINS] + cfg["rules"]
+
     OUT.mkdir(parents=True, exist_ok=True)
     # Tokens change when users.json is regenerated, and a left-over file keeps serving a UUID xray no
     # longer knows: the client then fails REALITY silently on every server. Better a 404 than that.
-    live = {x["sub"] for x in users}
+    live = {x["sub"] for x in users} | {x["sub"] + GAME_SUFFIX for x in users}
     attic = pathlib.Path("/root/attic/old-clash-subs")
     for f in OUT.iterdir():
         if f.is_file() and f.name not in live:
             attic.mkdir(parents=True, exist_ok=True); f.rename(attic / f.name)
             print(f"retired stale profile {f.name}")
-    text = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False, width=1000) if yaml else json.dumps(cfg, ensure_ascii=False, indent=1)
-    (OUT / u["sub"]).write_text(text); (OUT / u["sub"]).chmod(0o644)
-    url = f"https://{V['DOMAIN']}/c/{u['sub']}"
-    d = CL / name; (d / "clash.txt").write_text(url)
-    subprocess.run(["qrencode", "-o", str(d / "clash.png"), "-s", "8", "-m", "3", "-l", "M", url], check=True)
-    print(f"clash profile: {len(proxies)} proxies, {len(groups)} groups -> {url}")
+    d = CL / name
+    def publish(token, conf, stem, what):
+        text = yaml.safe_dump(conf, allow_unicode=True, sort_keys=False, width=1000) if yaml else json.dumps(conf, ensure_ascii=False, indent=1)
+        (OUT / token).write_text(text); (OUT / token).chmod(0o644)
+        url = f"https://{V['DOMAIN']}/c/{token}"
+        (d / f"{stem}.txt").write_text(url)
+        subprocess.run(["qrencode", "-o", str(d / f"{stem}.png"), "-s", "8", "-m", "3", "-l", "M", url], check=True)
+        print(f"{what}: {len(conf['proxies'])} proxies, {len(conf['proxy-groups'])} groups -> {url}")
+    if "--game-only" not in sys.argv[2:]:
+        publish(u["sub"], cfg, "clash", "clash profile")
+    publish(u["sub"] + GAME_SUFFIX, game, "clash-game", "gaming profile")
 
 if __name__ == "__main__":
     main()
