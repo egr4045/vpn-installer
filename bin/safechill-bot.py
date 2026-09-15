@@ -11,7 +11,7 @@ Two kinds of message, kept apart on purpose:
     One card lives in the chat at a time: asking for another replaces it.
 
 Default profile is ClashMi (one subscription: every server, auto-switching Россия → Амстердам →
-запасной, Russian sites direct); AmneziaVPN keys are the alternatives. Money is never shown.
+запасной, Russian sites direct); AmneziaVPN keys are the alternatives. Status shows balance runway in days.
 Texts are as terse as the alerts in vpn-health.sh: what to do, nothing said twice, nothing the reader
 cannot act on. The steps lead with copying rather than the QR — a phone cannot scan the QR on its own
 screen, and that is how the card is usually read; the QR is for a second screen.
@@ -21,15 +21,15 @@ their id lands in the journal — which is where the id for a new TG_ADMIN_IDS e
 Bot API will not list the members of a group.
 
 Commands: /users (the only advertised one). Hidden: /add /del /qr /status /newip /dropip /help
-CLI:      safechill-bot.py --card <name> <chat_id> [clash|ru|nl|awg|x2]   safechill-bot.py --status <chat_id>
+CLI:      safechill-bot.py --card <name> <chat_id> [clash|clashmi|ru|nl|awg|x2]   safechill-bot.py --status <chat_id>
 """
-import json, re, socket, subprocess, sys, time, urllib.request, urllib.error, uuid, html, pathlib
+import json, re, socket, subprocess, sys, time, urllib.request, urllib.error, uuid, html, pathlib, math
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 # api.telegram.org resolves to IPv6 first and this host's IPv6 path to it stalls on roughly one request in
 # five — a stalled long poll leaves the bot blind to taps until the socket times out, which is what made it
-# feel frozen for minutes. This process only talks to Telegram and GitHub, so pin it to IPv4 wholesale.
+# feel frozen for minutes. Pin outgoing requests (Telegram, GitHub, Timeweb) to IPv4 wholesale.
 _getaddrinfo = socket.getaddrinfo
 socket.getaddrinfo = lambda host, port, family=0, *a, **kw: _getaddrinfo(host, port, socket.AF_INET, *a, **kw)
 
@@ -224,9 +224,10 @@ def health():
     except Exception: return {}
 
 # ── the card to forward, and the person's screen that produces it ────────────
-PROFILES = ["clash", "ru", "nl", "awg", "x2"]        # order = what people should try first
-FILES = {"clash": "clash", "ru": "amnezia-ru", "nl": "amnezia", "awg": "amnezia-awg", "x2": "amnezia-x2"}
-BTNS = {"clash": "🧩 ClashMi", "ru": "🔑 Россия", "nl": "🔑 Амстердам",
+PROFILES = ["clash", "clashmi", "ru", "nl", "awg", "x2"]   # order = what people should try first
+FILES = {"clash": "clash", "clashmi": "clashmi", "ru": "amnezia-ru", "nl": "amnezia",
+         "awg": "amnezia-awg", "x2": "amnezia-x2"}
+BTNS = {"clash": "🧩 ClashMi", "clashmi": "💻 ClashMi · ПК", "ru": "🔑 Россия", "nl": "🔑 Амстердам",
         "awg": "⚡ AmneziaWG · дома", "x2": "🛟 Запасной"}
 ROUTE = {"ru": " · Россия → Амстердам", "nl": " · Амстердам",   # a suffix on the header line instead of a line
          "awg": " · AmneziaWG", "x2": " · Запасной"}            # of its own: the ~860-char key needs the room
@@ -242,7 +243,19 @@ def card_content(name, v):
     Only url and copy_text buttons: those are the ones a forward keeps, and this card exists to be
     forwarded. Navigation and deletion live in the person's screen instead."""
     d = CLIENTS / name; body = (d / f"{FILES[v]}.txt").read_text(encoding="utf-8").strip()
-    if v == "clash":
+    if v == "clashmi":
+        # the plain subscription carries no "tun:" — a desktop that only imports the link routes
+        # nothing but the core's own urltest, so the PC card hands over the restore archive instead
+        cap = (f"💻 <b>{BRAND}</b> · {esc(name)} · ПК\n\n"
+               f"1. Поставь ClashMi — кнопка ниже\n"
+               f"2. Запусти <b>от имени администратора</b> — без этого TUN не включится\n"
+               f"3. Скопируй ссылку (кнопка) → Настройки → «Резервное копирование и синхронизация» →\n"
+               f"   «Импорт и экспорт» → «Импорт из URL» → вставь\n"
+               f"4. Включи — профиль и TUN уже внутри")
+        rows = [[url("💻 Windows / Mac", CLASHMI_ALL), url("🌐 Сайт", CLASHMI_SITE)],
+                [copy("📋 Скопировать ссылку", body)]]
+        attach = None
+    elif v == "clash":
         cap = (f"🧩 <b>{BRAND}</b> · {esc(name)}\n\n"
                f"1. Поставь ClashMi — кнопки ниже\n"
                f"2. Скопируй ссылку (кнопка) → в приложении «+» → по ссылке\n"
@@ -321,9 +334,37 @@ def home(chat, mid=None):
     if mid: edit(chat, mid, text, kb); return mid
     return send(chat, text, kb)
 
+_BALANCE = (0.0, "")   # cache successes and failures for a minute to keep repeated taps fast
+
+def balance_line():
+    global _BALANCE
+    now = time.monotonic()
+    if now < _BALANCE[0]: return _BALANCE[1]
+    token = env_now().get("TW_API_TOKEN")
+    if not token: return "💳 Остаток баланса недоступен: не настроен Timeweb"
+    try:
+        req = urllib.request.Request("https://api.timeweb.cloud/api/v1/account/finances",
+                                     headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(req, timeout=5) as r: finances = json.load(r)["finances"]
+        hours = finances.get("hours_left")
+        if hours is None:
+            line = "💳 Срок остатка баланса неизвестен"
+        else:
+            hours = float(hours)
+            if not math.isfinite(hours): raise ValueError("invalid hours_left")
+            days = int(max(0, hours) // 24)
+            remaining = "на " + plural(days, "день", "дня", "дней") if days else "меньше чем на день"
+            line = (f"{'⚠️' if hours < 168 else '💳'} Баланса хватит {remaining}"
+                    if hours > 0 else "⚠️ Баланс исчерпан")
+    except Exception as e:
+        log("balance:", type(e).__name__)
+        line = "💳 Остаток баланса временно недоступен"
+    _BALANCE = (time.monotonic() + 60, line)
+    return line
+
 def status_view():
     h = health()
-    if not h: return "📊 Проверок ещё не было", [[btn("🔄 Проверить сейчас", "recheck"), btn("← Люди", "home")]]
+    if not h: return "📊 Проверок ещё не было\n" + balance_line(), [[btn("🔄 Проверить сейчас", "recheck"), btn("← Люди", "home")]]
     c = h.get("checks", {}); now = int(time.time())
     def ok(k): return c.get(k, {}).get("ok", True)
     def m(k): return "🟢" if ok(k) else SEV.get(k, "🟡")
@@ -335,6 +376,7 @@ def status_view():
     for k in bad:
         s = since.get(k); L.append(f"{SEV.get(k, '🟡')} {esc(cap1(c[k]['title']))}: {esc(c[k]['detail'])}" + (f", с {hhmm(s)}" if s else ""))
     if bad: L.append("")
+    L += [balance_line(), ""]
     cert = h.get("cert", {})
     L += [f"{h.get('flag', '🇳🇱')} <b>{esc(h.get('node', 'Амстердам'))}</b> · {esc(h.get('ip', ''))}",
           f"{m('xhttp')} :443 · {m('tcp')} :{h.get('tcp_port', 8443)} · {m('awg')} AmneziaWG · {m('nginx')} nginx · {m('egress4')} IPv4"
@@ -473,7 +515,7 @@ def on_message(msg):
             if args: do_add(chat, args[0])
             else: ask_name(chat)
         elif cmd == "/qr":
-            if not args: return send(chat, "/qr Имя [clash|ru|nl|awg|x2]")
+            if not args: return send(chat, "/qr Имя [clash|clashmi|ru|nl|awg|x2]")
             name = find_user(args[0])
             if not name: return send(chat, f"Нет такого человека: {esc(args[0])}")
             person(chat, None, name, args[1].lower() if len(args) > 1 else None)

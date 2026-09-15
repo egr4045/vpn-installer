@@ -89,10 +89,14 @@ amnezia-key.py "$NAME" nl awg >/dev/null
 [ -n "${EXIT2_HOST:-}" ] && amnezia-key.py "$NAME" x2 >/dev/null
 # mihomo / Clash Meta profile (ClashMi etc.): everything in one subscription with auto RU -> Amsterdam
 clash-sub.py "$NAME" >/dev/null
+# desktop restore archive: the subscription carries no "tun:", so a ClashMi on Windows that only
+# imported the link forwards nothing but its own urltest until someone finds the switch by hand
+clashmi-backup.py "$NAME" >/dev/null
 chmod 600 "$D"/*
 echo; echo "== $NAME =="
 echo "ONE-QR subscription (Happ etc.): $(cat "$D/sub.txt")"
-echo "Clash/mihomo profile (ClashMi):  $(cat "$D/clash.txt")"; echo
+echo "Clash/mihomo profile (ClashMi):  $(cat "$D/clash.txt")"
+echo "ClashMi desktop restore (TUN on): $(cat "$D/clashmi.txt")"; echo
 echo "AmneziaVPN one-QR key (xray+AWG): $D/amnezia.txt ($(wc -c < "$D/amnezia.txt") chars)"; echo
 echo "NL XHTTP (main, AmneziaVPN):     $(cat "$D/nl-xhttp.txt")"; echo
 echo "all files:                       $(ls "$D" | tr '\n' ' ')"

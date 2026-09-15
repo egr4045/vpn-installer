@@ -3,7 +3,8 @@
 set -euo pipefail
 ETC=/etc/safechill; NAME="${1:?usage: del-client.sh <name>}"
 SUB=$(jq -r --arg n "$NAME" '.[]|select(.name==$n)|.sub // empty' "$ETC/users.json")
-[ -n "$SUB" ] && rm -f "/var/www/html/s/$SUB"
+# every artefact keyed by the token: xray subscription, mihomo profiles, ClashMi restore archive
+[ -n "$SUB" ] && rm -f "/var/www/html/s/$SUB" "/var/www/html/c/$SUB" "/var/www/html/c/$SUB-game" "/var/www/html/z/$SUB.zip"
 tmp=$(mktemp); jq --arg n "$NAME" 'map(select(.name!=$n))' "$ETC/users.json" > "$tmp" && install -m600 "$tmp" "$ETC/users.json" && rm -f "$tmp"
 rm -f "$ETC/peers/$NAME.env"; rm -rf "/root/clients/$NAME"
 render.sh
