@@ -13,13 +13,14 @@ profile plus a "🎮 Игра" group that sends the game process out through Amn
 `clash-sub.py <name> --game-only` writes just that file and leaves the main profile untouched.
 """
 import copy, json, pathlib, subprocess, sys
+from service_routing import load_policy, apply_clash_policy, TRANSPORT_PROBE
 try:
     import yaml
 except ImportError:  # JSON is valid YAML; mihomo reads it fine
     yaml = None
 
 ETC = pathlib.Path("/etc/safechill"); CL = pathlib.Path("/root/clients"); OUT = pathlib.Path("/var/www/html/c")
-PROBE = "https://www.gstatic.com/generate_204"
+PROBE = TRANSPORT_PROBE
 
 # Services whose CDN answers with caches inside Russian ISPs, which are exactly the throttled or blocked
 # path: measured from Moscow, www.tiktok.com -> 164.215.74.x (AS29076 RU), tiktokcdn/ttwstatic ->
@@ -87,6 +88,7 @@ def main():
     if len(sys.argv) < 2: sys.exit("usage: clash-sub.py <name>")
     name = sys.argv[1]
     V = load_env(ETC / "vpn.env"); S = load_env(ETC / "secrets.env")
+    service_policy = load_policy(ETC / "service-routing.json")
     users = json.loads((ETC / "users.json").read_text())
     u = next((x for x in users if x["name"] == name), None) or sys.exit(f"unknown user {name}")
     P = load_env(ETC / "peers" / f"{name}.env") if (ETC / "peers" / f"{name}.env").exists() else {}
@@ -199,6 +201,7 @@ def main():
             "GEOIP,RU,DIRECT", f"MATCH,🔐 {brand}",
         ],
     }
+    apply_clash_policy(cfg, service_policy, auto_order)
     # Gaming variant: one extra fallback group, first in line after the selector so it is visible on
     # the Proxy screen, and its rules ahead of everything else. AWG first (two exits), then XHTTP straight
     # to Amsterdam without the Moscow hop, then whatever "Авто" is doing — never a dead end when UDP to
@@ -219,7 +222,10 @@ def main():
     game["proxy-groups"].insert(1, {"name": GAME, "type": "fallback",
                                     "proxies": awg_order + [n for n in spare_order if "IPv6" not in n] + [AUTO],
                                     **{**probe, "interval": 60}})
-    game["rules"] = [f"PROCESS-NAME,{p},{GAME}" for p in GAME_PROCESS] + [f"DOMAIN-SUFFIX,{d},{GAME}" for d in GAME_DOMAINS] + cfg["rules"]
+    service_count = len(service_policy["domains"])
+    game["rules"] = (cfg["rules"][:service_count]
+        + [f"PROCESS-NAME,{p},{GAME}" for p in GAME_PROCESS]
+        + [f"DOMAIN-SUFFIX,{d},{GAME}" for d in GAME_DOMAINS] + cfg["rules"][service_count:])
 
     OUT.mkdir(parents=True, exist_ok=True)
     # Tokens change when users.json is regenerated, and a left-over file keeps serving a UUID xray no

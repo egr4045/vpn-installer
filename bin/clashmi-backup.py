@@ -17,7 +17,7 @@ import json, pathlib, subprocess, sys, zipfile
 
 ETC = pathlib.Path("/etc/safechill"); CL = pathlib.Path("/root/clients")
 SUB = pathlib.Path("/var/www/html/c"); OUT = pathlib.Path("/var/www/html/z")
-PROBE = "https://www.gstatic.com/generate_204"
+PROBE = "https://cp.cloudflare.com/generate_204"
 
 def load_env(p):
     env = {}

@@ -1,0 +1,5 @@
+{
+  "domains": ["google.com", "googleapis.com", "gstatic.com", "googleusercontent.com"],
+  "preferred_exit": "standby",
+  "fallback_to_primary": false
+}

@@ -15,6 +15,10 @@ export EGRESS_STRATEGY=$([ "${EGRESS_PREFER:-ipv4}" = ipv6 ] && echo UseIPv6v4 |
 export TCP_PORT=${TCP_PORT:-8443} FALLBACK_SNI=${FALLBACK_SNI:-gateway.icloud.com}
 export AWG_NET4=${AWG_NET4:-10.8.0} AWG_NET6=${AWG_NET6:-fd08:5afe:c411} AWG_PORT=${AWG_PORT:-39217}
 SSHOPT=(-o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new)
+SERVICE_ROUTER="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/service_routing.py"
+# Validate policy before replacing any running config. The resolved policy is copied to standby.
+service_policy=$(mktemp)
+python3 "$SERVICE_ROUTER" --dump-policy > "$service_policy"
 
 inject_users() { # inject_users <rendered.json> <out.json> [relay-uuid]
   jq --slurpfile users "$ETC/users.json" --arg relay "${3:-}" '
@@ -30,6 +34,11 @@ t1=$(mktemp --suffix=.json); t2=$(mktemp --suffix=.json)   # xray detects config
 # -- this exit node's xray ---------------------------------------------------------
 envsubst < "$TPL/xray.json.tpl" > "$t1"
 inject_users "$t1" "$t2" "$RELAY_UUID"
+export RU_SNI=${RU_SNI:-yandex.ru}
+service_relay=$(mktemp --suffix=.json)
+envsubst < "$TPL/xray-ru.json.tpl" > "$service_relay"
+python3 "$SERVICE_ROUTER" --policy "$service_policy" --role exit --relay "$service_relay" "$t2" "$t1"
+mv "$t1" "$t2"
 xray run -test -c "$t2" >/dev/null || { echo "xray config test FAILED:"; xray run -test -c "$t2"; exit 1; }
 install -m644 "$t2" /usr/local/etc/xray/config.json
 n_users=$(jq 'length' "$ETC/users.json")
@@ -75,6 +84,8 @@ if [ -n "${EXIT2_HOST:-}" ]; then
   # re-rendered because the old render.sh had no such step).
   if ssh "${SSHOPT[@]}" "root@$EXIT2_HOST" "rm -rf /etc/safechill/peers.new" \
      && scp "${SSHOPT[@]}" -q "$(readlink -f "${BASH_SOURCE[0]}")" "root@$EXIT2_HOST:/usr/local/bin/render.sh" \
+     && scp "${SSHOPT[@]}" -q "$SERVICE_ROUTER" "root@$EXIT2_HOST:/usr/local/bin/service_routing.py" \
+     && scp "${SSHOPT[@]}" -q "$service_policy" "root@$EXIT2_HOST:/etc/safechill/service-routing.json" \
      && scp "${SSHOPT[@]}" -q "$ETC/users.json" "root@$EXIT2_HOST:/etc/safechill/users.json" \
      && scp "${SSHOPT[@]}" -q -r "$ETC/peers" "root@$EXIT2_HOST:/etc/safechill/peers.new" \
      && scp "${SSHOPT[@]}" -q -r "$TPL" "root@$EXIT2_HOST:/usr/local/share/safechill/templates.new" \
@@ -99,11 +110,13 @@ if [ -n "${RU_HOST:-}" ]; then
     jq --arg h "$EXIT2_HOST" --arg sni "$EXIT2_DOMAIN" '
       (.outbounds[] | select(.tag=="to-exit")) as $o |
       .outbounds += [ $o | .tag="standby-exit" | .settings.vnext[0].address=$h | .streamSettings.realitySettings.serverName=$sni ] |
-      .observatory = {subjectSelector:["to-exit","standby-exit"], probeUrl:"https://www.gstatic.com/generate_204", probeInterval:"20s", enableConcurrency:true} |
+      .observatory = {subjectSelector:["to-exit","standby-exit"], probeUrl:"https://cp.cloudflare.com/generate_204", probeInterval:"20s", enableConcurrency:true} |
       .routing.balancers = [{tag:"exits", selector:["to-exit"], fallbackTag:"standby-exit", strategy:{type:"leastPing"}}] |
       .routing.rules |= map(if .outboundTag=="to-exit" then del(.outboundTag) | .balancerTag="exits" else . end)' "$t1" > "$t2" && mv "$t2" "$t1"
   fi
   inject_users "$t1" "$t2" ""
+  python3 "$SERVICE_ROUTER" --policy "$service_policy" --role entry "$t2" "$t1"
+  mv "$t1" "$t2"
   xray run -test -c "$t2" >/dev/null || { echo "RU xray config test FAILED:"; xray run -test -c "$t2"; exit 1; }
   t3=$(mktemp)
   { echo "BRAND=${BRAND:-SafeChill}"; echo "NL_IP=$SERVER_IP"; echo "DOMAIN=$DOMAIN"; echo "TCP_PORT=$TCP_PORT"
@@ -138,4 +151,4 @@ if [ -n "${CERT_DIR:-}" ] && [ -f "$CERT_DIR/fullchain.pem" ] && grep -qs 8444 /
   fi
   rm -f "$tng"
 fi
-rm -f "$t1" "$t2"
+rm -f "$t1" "$t2" "$service_policy" "$service_relay"
