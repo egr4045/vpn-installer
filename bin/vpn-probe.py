@@ -214,7 +214,17 @@ def main():
                     or type(result.get('delay_ms')) not in (int, float)
                     or not 0 <= result['delay_ms'] <= 120000):
                 parser.error('invalid Windows path check')
-            clean.append({k: result[k] for k in ('path', 'transport', 'network_ok', 'delay_ms')})
+            sanitized = {k: result[k] for k in ('path', 'transport', 'network_ok', 'delay_ms')}
+            error = result.get('error_kind', '')
+            if isinstance(error, str) and re.fullmatch(r'[A-Za-z0-9_]{1,40}', error):
+                sanitized['error_kind'] = error
+            if type(result.get('retry_ok')) is bool:
+                sanitized['retry_ok'] = result['retry_ok']
+            for key in ('test_elapsed_s', 'retry_delay_ms'):
+                value = result.get(key)
+                if type(value) in (int, float) and 0 <= value <= 120000:
+                    sanitized[key] = value
+            clean.append(sanitized)
         if len({(r['path'], r['transport']) for r in clean}) != 6:
             parser.error('duplicate Windows path check')
         snapshot = {'time': datetime.datetime.now(datetime.timezone.utc).isoformat(),

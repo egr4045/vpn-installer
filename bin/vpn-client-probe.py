@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -43,12 +44,26 @@ def main():
                 path = '/proxies/' + urllib.parse.quote(proxy, safe='') + '/delay?' + urllib.parse.urlencode({
                     'url': 'https://cp.cloudflare.com/generate_204', 'timeout': 4000})
                 result = {'path': 'windows-' + label, 'transport': transport, 'delay_ms': 0, 'network_ok': False}
+                started = time.monotonic()
                 try:
                     delay = get(path).get('delay')
                     if isinstance(delay, (int, float)) and 0 < delay <= 120000:
                         result.update(delay_ms=delay, network_ok=True)
-                except (OSError, ValueError, urllib.error.URLError):
-                    pass
+                except urllib.error.HTTPError as error:
+                    result['error_kind'] = 'http_' + str(error.code)
+                except (OSError, ValueError, urllib.error.URLError) as error:
+                    result['error_kind'] = type(error).__name__
+                result['test_elapsed_s'] = round(time.monotonic() - started, 3)
+                if not result['network_ok']:
+                    # Preserve the failed cold attempt; one repeat distinguishes a brief first-dial
+                    # problem from a path that stays down. It must not erase the initial failure.
+                    try:
+                        delay = get(path).get('delay')
+                        result['retry_ok'] = isinstance(delay, (int, float)) and 0 < delay <= 120000
+                        if result['retry_ok']:
+                            result['retry_delay_ms'] = delay
+                    except (OSError, ValueError, urllib.error.URLError):
+                        result['retry_ok'] = False
                 results.append(result)
         if len(results) == 6:
             snapshot['results'] = results
