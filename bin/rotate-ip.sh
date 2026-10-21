@@ -53,7 +53,7 @@ done   # .fqdn is checked too, so this loop can never reach the zone apex A reco
 # switch config and re-issue
 sed -i "s/^SERVER_IP=.*/SERVER_IP=$NEW/" "$ETC/vpn.env"
 render.sh
-systemctl restart xray
+xray-safe-apply.py restart
 for n in $(jq -r '.[].name' "$ETC/users.json"); do add-client.sh "$n" >/dev/null 2>&1 || echo "! add-client $n failed"; done
 [ "$STALE" = 0 ] || echo "! an old A record is still in the zone: some clients will resolve to $OLD"
 echo "done: $OLD -> $NEW. ClashMi subscriptions update themselves; Amnezia keys must be handed out again."

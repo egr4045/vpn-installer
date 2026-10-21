@@ -1,0 +1,10 @@
+{
+  "domains": ["google.com", "googleapis.com", "gstatic.com", "googleusercontent.com"],
+  "preferred_exit": "standby",
+  "fallback_to_primary": false,
+  "tiktok": {
+    "domains": ["tiktok.com", "tiktokv.com", "tiktokv.us", "tiktokcdn.com", "tiktokcdn-us.com", "tiktokcdn-eu.com", "tiktokcdn-in.com", "ttwstatic.com", "ttlivecdn.com", "byteoversea.com", "ibytedtos.com", "byteimg.com", "bytedapm.com", "isnssdk.com", "snssdk.com", "muscdn.com", "musical.ly"],
+    "preferred_exit": "standby",
+    "fallback_to_primary": false
+  }
+}

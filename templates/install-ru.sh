@@ -5,7 +5,7 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 TCP_PORT=${TCP_PORT:-8443}
 apt-get update -qq
-apt-get install -y -qq ufw fail2ban curl jq openssl >/dev/null
+apt-get install -y -qq ufw fail2ban curl jq openssl python3 >/dev/null
 # stopped until the exit node pushes jail.d/safechill.local: the distro default enables the sshd jail
 # with no ignoreip, and the nodes ssh to each other to render and to restart a stuck xray
 systemctl stop fail2ban 2>/dev/null || true; systemctl disable fail2ban 2>/dev/null || true

@@ -1,0 +1,10 @@
+[Unit]
+Description=Authenticated VPN and TikTok web checks (not app-feed verification)
+After=network-online.target xray.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vpn-probe.py --watch --transport all
+Nice=10
+MemoryMax=192M
+TimeoutStartSec=120

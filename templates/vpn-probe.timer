@@ -1,0 +1,10 @@
+[Unit]
+Description=Check VPN paths and TikTok web every five minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+RandomizedDelaySec=20
+
+[Install]
+WantedBy=timers.target

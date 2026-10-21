@@ -38,7 +38,7 @@ fi
 set -a; . "$ETC/peers/$NAME.env"; set +a
 
 render.sh
-systemctl restart xray
+xray-safe-apply.py restart
 awg syncconf awg0 <(awg-quick strip awg0) 2>/dev/null || systemctl restart awg-quick@awg0
 
 # -- files --------------------------------------------------------------------------------------

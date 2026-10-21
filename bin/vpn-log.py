@@ -13,7 +13,7 @@ relay user — so "who" comes from there and "what the exit got back" from here.
 What the log can and cannot say: xray forwards TLS without opening it, so there are no HTTP status
 codes here. A result is connection-level — established, refused, timed out, DNS failed.
 """
-import argparse, collections, re, subprocess, sys, pathlib
+import argparse, collections, re, subprocess, sys, pathlib, shlex
 
 ETC = pathlib.Path("/etc/safechill")
 # 2026/09/04 14:13:10.777921 from 1.2.3.4:5678 accepted tcp:host:443 [xhttp-reality >> direct] email: Egor
@@ -60,20 +60,23 @@ def journal(host, since, until, needle, errors_only):
     cmd = ["journalctl", "-u", "xray", "--no-pager", "-o", "cat", "--since", since]
     if until: cmd += ["--until", until]
     if needle:
-        flt = f" | grep -F -i -- {needle!r}"
+        cmd += ['--grep', re.escape(needle), '--case-sensitive=no']
     elif errors_only:   # "accepted" comes too, or a failure has no name and no source to attach it to
         cmd += ["-n", str(CAP)]
-        flt = " | grep -E -- 'accepted|failed|rejected|refused|timeout|unreachable|no such host|received request for'"
+        cmd += ['--grep', 'accepted|failed|rejected|refused|timeout|unreachable|no such host|received request for']
     else:
-        cmd += ["-n", str(CAP)]; flt = ""
-    remote = " ".join(cmd) + flt
-    argv = remote if host is None else None
+        cmd += ["-n", str(CAP)]
+    argv = cmd if host is None else ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+                                    f"root@{host}", shlex.join(cmd)]
     try:
-        p = subprocess.run(argv or ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", f"root@{host}", remote],
-                           shell=argv is not None, capture_output=True, text=True, timeout=180)
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=180)
+        # journalctl --grep returns 1 when there are simply no matches. Actual read/SSH
+        # failures include diagnostics and must not masquerade as an empty journal.
+        if p.returncode and (p.returncode != 1 or p.stderr.strip()):
+            raise RuntimeError(f"journal unavailable on {host or 'local node'}: {p.stderr.strip()[-400:]}")
         return p.stdout.splitlines()
     except subprocess.SubprocessError as ex:
-        print(f"  ! {host or 'локально'}: {ex}", file=sys.stderr); return []
+        raise RuntimeError(f"journal unavailable on {host or 'local node'}: {ex}") from ex
 
 
 def parse(lines):

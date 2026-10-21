@@ -152,7 +152,7 @@ if [ -f /etc/fail2ban/jail.d/safechill.local ] && grep -q "$SERVER_IP" /etc/fail
 else
   echo "! fail2ban left stopped: $SERVER_IP is not in its ignore list"
 fi
-systemctl enable xray >/dev/null 2>&1 || true; systemctl restart xray
+systemctl enable xray >/dev/null 2>&1 || true; xray-safe-apply.py restart
 systemctl enable "awg-quick@awg0" >/dev/null 2>&1 || true
 if systemctl restart "awg-quick@awg0"; then ok "xray + awg0 up"
 else echo "! awg0 failed to start — see: journalctl -u awg-quick@awg0 -n 30"; journalctl -u awg-quick@awg0 -n 15 --no-pager | tail -8; fi
@@ -160,6 +160,12 @@ else echo "! awg0 failed to start — see: journalctl -u awg-quick@awg0 -n 30"; 
 # -- 7. health timer -----------------------------------------------------------
 say "Health checks (every minute, Telegram alerts)"
 install -m755 "$REPO/templates/vpn-health.sh" /usr/local/bin/vpn-health.sh
+if [ -n "${EXIT2_HOST:-}" ]; then
+  install -m644 "$REPO/templates/vpn-probe.service" "$REPO/templates/vpn-probe.timer" /etc/systemd/system/
+  install -m644 "$REPO/templates/safechill-probes.logrotate" /etc/logrotate.d/safechill-probes
+  systemctl daemon-reload
+  systemctl enable --now vpn-probe.timer >/dev/null
+fi
 install -m644 "$REPO/templates/vpn-health.service" /etc/systemd/system/vpn-health.service
 install -m644 "$REPO/templates/vpn-health.timer" /etc/systemd/system/vpn-health.timer
 systemctl daemon-reload; systemctl enable --now vpn-health.timer >/dev/null

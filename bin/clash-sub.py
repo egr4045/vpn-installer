@@ -201,7 +201,10 @@ def main():
             "GEOIP,RU,DIRECT", f"MATCH,🔐 {brand}",
         ],
     }
-    apply_clash_policy(cfg, service_policy, auto_order)
+    primary_test = awg_order[0] if "--tiktok-primary-test" in sys.argv and awg_order else None
+    if "--tiktok-primary-test" in sys.argv and not primary_test:
+        sys.exit("TikTok primary test requires an existing dedicated AWG peer")
+    apply_clash_policy(cfg, service_policy, auto_order, primary_test)
     # Gaming variant: one extra fallback group, first in line after the selector so it is visible on
     # the Proxy screen, and its rules ahead of everything else. AWG first (two exits), then XHTTP straight
     # to Amsterdam without the Moscow hop, then whatever "Авто" is doing — never a dead end when UDP to
@@ -222,7 +225,7 @@ def main():
     game["proxy-groups"].insert(1, {"name": GAME, "type": "fallback",
                                     "proxies": awg_order + [n for n in spare_order if "IPv6" not in n] + [AUTO],
                                     **{**probe, "interval": 60}})
-    service_count = len(service_policy["domains"])
+    service_count = len(service_policy["domains"]) + len(service_policy.get("tiktok", {}).get("domains", []))
     game["rules"] = (cfg["rules"][:service_count]
         + [f"PROCESS-NAME,{p},{GAME}" for p in GAME_PROCESS]
         + [f"DOMAIN-SUFFIX,{d},{GAME}" for d in GAME_DOMAINS] + cfg["rules"][service_count:])

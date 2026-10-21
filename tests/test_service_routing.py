@@ -70,6 +70,34 @@ class ServiceRoutingTests(unittest.TestCase):
             self.assertNotIn(b["fallbackTag"], matches)
             self.assertIn(matches[0], c["observatory"]["subjectSelector"])
 
+    def test_tiktok_failover_does_not_relax_google_policy_or_loop_on_standby(self):
+        self.policy["tiktok"] = {"domains": ["tiktok.com"], "preferred_exit": "standby",
+                                 "fallback_to_primary": True}
+        c = apply_policy(self.exit, self.policy, "exit", self.env, self.relay)
+        google, tiktok = c["routing"]["rules"][-2:]
+        self.assertEqual(google["outboundTag"], "service-standby")
+        self.assertEqual(tiktok["balancerTag"], "tiktok-exits")
+        self.assertEqual(c["routing"]["balancers"][-1]["selector"], ["tiktok-standby"])
+        self.assertEqual(c["routing"]["balancers"][-1]["fallbackTag"], "tiktok-ipv4")
+        c = apply_policy(self.entry, self.policy, "entry", self.env)
+        self.assertEqual(c["routing"]["rules"][0]["balancerTag"], "tiktok-exits")
+        self.assertEqual(c["routing"]["rules"][1]["outboundTag"], "standby-exit")
+        self.assertEqual(c["routing"]["balancers"][-1]["fallbackTag"], "to-exit")
+        self.assertEqual(c["routing"]["balancers"][0], self.entry["routing"]["balancers"][0])
+        c = apply_policy(self.exit, self.policy, "exit", {"SERVER_IP": "192.0.2.2"})
+        self.assertEqual(c["routing"]["rules"][-1]["outboundTag"], "tiktok-ipv4")
+        self.assertFalse(any(o["protocol"] == "vless" for o in c["outbounds"]))
+
+    def test_tiktok_manual_phone_trial_defaults_to_existing_route(self):
+        self.policy["tiktok"] = {"domains": ["tiktok.com"], "preferred_exit": "standby",
+                                 "fallback_to_primary": False}
+        c = {"proxy-groups": [], "rules": ["MATCH,FAST"]}
+        apply_clash_policy(c, self.policy, ["RU", "NL"], "AWG NL1")
+        self.assertEqual(c["rules"][:2], ["DOMAIN-SUFFIX,tiktok.com,🎵 TikTok",
+                                         "DOMAIN-SUFFIX,google.com,🌍 Сервисы"])
+        group = next(g for g in c["proxy-groups"] if g["name"] == "🎵 TikTok")
+        self.assertEqual(group["proxies"], ["🎵 TikTok авто", "AWG NL1"])
+
     def test_policy_validation_and_extra_services(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "policy.json"
@@ -80,9 +108,16 @@ class ServiceRoutingTests(unittest.TestCase):
                 path.write_text(json.dumps(bad))
                 with self.assertRaises(ValueError):
                     load_policy(path)
+            for bad in ({"domains": ["google.com"], "tiktok": {"domains": ["tiktok.com"]}},
+                        {"domains": ["tiktok.com"], "tiktok": {"domains": ["tiktok.com"],
+                            "preferred_exit": "standby", "fallback_to_primary": True}}):
+                path.write_text(json.dumps(bad))
+                with self.assertRaises(ValueError):
+                    load_policy(path)
             path.write_text(json.dumps({"domains": ["google.com", "openai.com", "openai.com"]}))
             self.assertEqual(load_policy(path)["domains"], ["google.com", "openai.com"])
         self.assertEqual(load_policy(ROOT / "service-routing.example.json"), DEFAULT_POLICY)
+        self.assertFalse(load_policy(ROOT / "tiktok-routing.example.json")["tiktok"]["fallback_to_primary"])
 
     def test_fast_mode_and_geoip_cannot_bypass_service_route(self):
         c = {"proxy-groups": [], "rules": ["GEOIP,RU,DIRECT", "MATCH,FAST"]}

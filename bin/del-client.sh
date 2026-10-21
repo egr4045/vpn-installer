@@ -8,6 +8,6 @@ SUB=$(jq -r --arg n "$NAME" '.[]|select(.name==$n)|.sub // empty' "$ETC/users.js
 tmp=$(mktemp); jq --arg n "$NAME" 'map(select(.name!=$n))' "$ETC/users.json" > "$tmp" && install -m600 "$tmp" "$ETC/users.json" && rm -f "$tmp"
 rm -f "$ETC/peers/$NAME.env"; rm -rf "/root/clients/$NAME"
 render.sh
-systemctl restart xray
+xray-safe-apply.py restart
 awg syncconf awg0 <(awg-quick strip awg0) 2>/dev/null || systemctl restart awg-quick@awg0
 echo "removed $NAME"

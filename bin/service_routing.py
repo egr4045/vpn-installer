@@ -21,9 +21,21 @@ def load_policy(path=POLICY_PATH):
     policy = copy.deepcopy(DEFAULT_POLICY)
     if Path(path).exists():
         custom = json.loads(Path(path).read_text(encoding="utf-8"))
-        if not isinstance(custom, dict) or set(custom) - set(policy):
+        if not isinstance(custom, dict) or set(custom) - (set(policy) | {"tiktok"}):
             raise ValueError("service-routing.json: unknown fields or non-object policy")
         policy.update(custom)
+    validate_policy(policy)
+    if "tiktok" in policy:
+        tiktok = policy["tiktok"]
+        if not isinstance(tiktok, dict) or set(tiktok) != set(DEFAULT_POLICY):
+            raise ValueError("tiktok must contain domains, preferred_exit and fallback_to_primary")
+        validate_policy(tiktok)
+        if set(policy["domains"]) & set(tiktok["domains"]):
+            raise ValueError("service domain lists must not overlap")
+    return policy
+
+
+def validate_policy(policy):
     domains = policy["domains"]
     if not isinstance(domains, list) or any(
         not isinstance(d, str) or len(d) > 253 or "." not in d
@@ -36,11 +48,17 @@ def load_policy(path=POLICY_PATH):
         raise ValueError("preferred_exit must be primary or standby")
     if type(policy["fallback_to_primary"]) is not bool:
         raise ValueError("fallback_to_primary must be boolean")
-    return policy
 
 
 def apply_policy(config, policy, role, env, relay=None):
     """Apply to freshly rendered configs; relay is the rendered RU outbound to primary."""
+    c = _apply_policy(config, policy, role, env, relay, "service")
+    if policy.get("tiktok", {}).get("domains"):
+        c = _apply_policy(c, policy["tiktok"], role, env, relay, "tiktok")
+    return c
+
+
+def _apply_policy(config, policy, role, env, relay, namespace):
     c = copy.deepcopy(config)
     if not policy["domains"]:
         return c
@@ -62,14 +80,14 @@ def apply_policy(config, policy, role, env, relay=None):
         # ForceIPv4 does not fall back to the system resolver/IPv6 on an A lookup failure.
         # Binding the IPv4 source also rejects unsniffable literal IPv6 destinations.
         source = str(ipaddress.IPv4Address(env["SERVER_IP"]))
-        c["outbounds"].append({"tag": "service-ipv4", "protocol": "freedom",
+        c["outbounds"].append({"tag": namespace + "-ipv4", "protocol": "freedom",
                                "sendThrough": source, "settings": {"domainStrategy": "ForceIPv4"}})
-        target = fallback = "service-ipv4"
+        target = fallback = namespace + "-ipv4"
         if standby:
             if relay is None:
                 raise ValueError("rendered relay required for standby service route")
             outbound = copy.deepcopy(relay)
-            outbound["tag"] = target = "service-standby"
+            outbound["tag"] = target = namespace + "-standby"
             outbound["settings"]["vnext"][0]["address"] = env["EXIT2_HOST"]
             outbound["streamSettings"]["realitySettings"]["serverName"] = env["EXIT2_DOMAIN"]
             c["outbounds"].append(outbound)
@@ -77,7 +95,7 @@ def apply_policy(config, policy, role, env, relay=None):
         insert_at = len(rules)
     if standby and policy["fallback_to_primary"]:
         routing.setdefault("balancers", []).append({
-            "tag": "service-exits", "selector": [target], "fallbackTag": fallback,
+            "tag": namespace + "-exits", "selector": [target], "fallbackTag": fallback,
             "strategy": {"type": "leastPing"},
         })
         obs = c.setdefault("observatory", {"subjectSelector": [],
@@ -85,22 +103,31 @@ def apply_policy(config, policy, role, env, relay=None):
             "enableConcurrency": True})
         if target not in obs["subjectSelector"]:
             obs["subjectSelector"].append(target)
-        rule["balancerTag"] = "service-exits"
+        rule["balancerTag"] = namespace + "-exits"
     else:
         rule["outboundTag"] = target
     rules.insert(insert_at, rule)
     return c
 
 
-def apply_clash_policy(config, policy, auto_order):
+def apply_clash_policy(config, policy, auto_order, primary_test=None):
+    _apply_clash_policy(config, policy, auto_order, "🌍 Сервисы")
+    if policy.get("tiktok", {}).get("domains"):
+        _apply_clash_policy(config, policy["tiktok"], auto_order, "🎵 TikTok", primary_test)
+
+
+def _apply_clash_policy(config, policy, auto_order, group, primary_test=None):
     if not policy["domains"]:
         return
     # Never let FAST/AWG bypass the server's service policy. RU stays first for mobile
     # allowlists; either primary Xray or RU forwards selected services to the same exit.
-    group = "🌍 Сервисы"
-    config["proxy-groups"].append({"name": group, "type": "fallback", "hidden": True,
+    auto = group + " авто" if primary_test else group
+    config["proxy-groups"].append({"name": auto, "type": "fallback", "hidden": True,
         "proxies": list(auto_order), "url": "https://www.gstatic.com/generate_204",
         "interval": 120, "timeout": 3000, "lazy": False})
+    if primary_test:
+        config["proxy-groups"].append({"name": group, "type": "select",
+            "proxies": [auto, primary_test]})
     # Ahead of GEOIP,RU and process DIRECT exceptions: a Russian CDN answer must not leak.
     config["rules"][:0] = [f"DOMAIN-SUFFIX,{d},{group}" for d in policy["domains"]]
 

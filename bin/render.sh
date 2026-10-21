@@ -5,7 +5,7 @@
 #   RU entry          : templates/xray-ru.json.tpl + users.json  (+ balancer: this exit first, EXIT2 as fallback)
 #                       -> scp to RU_HOST, restart there; /etc/safechill/ru.env with alert settings
 #   standby exit      : users.json + peers/ -> EXIT2_HOST, render + restart there
-# Does NOT restart local services; callers decide. Safe to run any time.
+# Stages the local config without restarting it; callers use xray-safe-apply.py restart.
 set -euo pipefail
 ETC=/etc/safechill
 TPL="${REPO_TPL:-/usr/local/share/safechill/templates}"
@@ -16,6 +16,10 @@ export TCP_PORT=${TCP_PORT:-8443} FALLBACK_SNI=${FALLBACK_SNI:-gateway.icloud.co
 export AWG_NET4=${AWG_NET4:-10.8.0} AWG_NET6=${AWG_NET6:-fd08:5afe:c411} AWG_PORT=${AWG_PORT:-39217}
 SSHOPT=(-o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new)
 SERVICE_ROUTER="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/service_routing.py"
+XRAY_DEPLOY="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/xray-safe-apply.py"
+install -d /etc/systemd/system/xray.service.d
+install -m644 "$TPL/xray-safe-start.conf" /etc/systemd/system/xray.service.d/20-safechill-preflight.conf
+systemctl daemon-reload
 # Validate policy before replacing any running config. The resolved policy is copied to standby.
 service_policy=$(mktemp)
 python3 "$SERVICE_ROUTER" --dump-policy > "$service_policy"
@@ -39,8 +43,7 @@ service_relay=$(mktemp --suffix=.json)
 envsubst < "$TPL/xray-ru.json.tpl" > "$service_relay"
 python3 "$SERVICE_ROUTER" --policy "$service_policy" --role exit --relay "$service_relay" "$t2" "$t1"
 mv "$t1" "$t2"
-xray run -test -c "$t2" >/dev/null || { echo "xray config test FAILED:"; xray run -test -c "$t2"; exit 1; }
-install -m644 "$t2" /usr/local/etc/xray/config.json
+python3 "$XRAY_DEPLOY" install "$t2"
 n_users=$(jq 'length' "$ETC/users.json")
 
 # -- AmneziaWG --------------------------------------------------------------------
@@ -85,15 +88,17 @@ if [ -n "${EXIT2_HOST:-}" ]; then
   if ssh "${SSHOPT[@]}" "root@$EXIT2_HOST" "rm -rf /etc/safechill/peers.new" \
      && scp "${SSHOPT[@]}" -q "$(readlink -f "${BASH_SOURCE[0]}")" "root@$EXIT2_HOST:/usr/local/bin/render.sh" \
      && scp "${SSHOPT[@]}" -q "$SERVICE_ROUTER" "root@$EXIT2_HOST:/usr/local/bin/service_routing.py" \
+     && scp "${SSHOPT[@]}" -q "$XRAY_DEPLOY" "root@$EXIT2_HOST:/usr/local/bin/xray-safe-apply.py" \
      && scp "${SSHOPT[@]}" -q "$service_policy" "root@$EXIT2_HOST:/etc/safechill/service-routing.json" \
      && scp "${SSHOPT[@]}" -q "$ETC/users.json" "root@$EXIT2_HOST:/etc/safechill/users.json" \
      && scp "${SSHOPT[@]}" -q -r "$ETC/peers" "root@$EXIT2_HOST:/etc/safechill/peers.new" \
      && scp "${SSHOPT[@]}" -q -r "$TPL" "root@$EXIT2_HOST:/usr/local/share/safechill/templates.new" \
      && scp "${SSHOPT[@]}" -q "$tf2b" "root@$EXIT2_HOST:/tmp/safechill-f2b.local" \
-     && ssh "${SSHOPT[@]}" "root@$EXIT2_HOST" "rm -rf /etc/safechill/peers && mv /etc/safechill/peers.new /etc/safechill/peers && rm -rf /usr/local/share/safechill/templates && mv /usr/local/share/safechill/templates.new /usr/local/share/safechill/templates && install -d /etc/systemd/journald.conf.d && install -m644 /usr/local/share/safechill/templates/journald-99-safechill.conf /etc/systemd/journald.conf.d/99-safechill.conf && systemctl restart systemd-journald && render.sh >/dev/null && { if [ -d /etc/fail2ban ]; then install -d /etc/fail2ban/jail.d && install -m644 /tmp/safechill-f2b.local /etc/fail2ban/jail.d/safechill.local && { systemctl reload fail2ban 2>/dev/null || true; }; fi; } && sed -i '/^HEALTH_TG=/d' /etc/safechill/vpn.env && echo HEALTH_TG=0 >> /etc/safechill/vpn.env && systemctl restart xray && (awg syncconf awg0 <(awg-quick strip awg0) 2>/dev/null || systemctl restart awg-quick@awg0)"; then
+     && ssh "${SSHOPT[@]}" "root@$EXIT2_HOST" "rm -rf /etc/safechill/peers && mv /etc/safechill/peers.new /etc/safechill/peers && rm -rf /usr/local/share/safechill/templates && mv /usr/local/share/safechill/templates.new /usr/local/share/safechill/templates && chmod 755 /usr/local/bin/xray-safe-apply.py && install -d /etc/systemd/journald.conf.d && install -m644 /usr/local/share/safechill/templates/journald-99-safechill.conf /etc/systemd/journald.conf.d/99-safechill.conf && systemctl restart systemd-journald && render.sh >/dev/null && { if [ -d /etc/fail2ban ]; then install -d /etc/fail2ban/jail.d && install -m644 /tmp/safechill-f2b.local /etc/fail2ban/jail.d/safechill.local && { systemctl reload fail2ban 2>/dev/null || true; }; fi; } && sed -i '/^HEALTH_TG=/d' /etc/safechill/vpn.env && echo HEALTH_TG=0 >> /etc/safechill/vpn.env && xray-safe-apply.py restart && (awg syncconf awg0 <(awg-quick strip awg0) 2>/dev/null || systemctl restart awg-quick@awg0)"; then
     echo "synced standby exit $EXIT2_HOST ($n_users users, $n_peers peers)"
   else
-    echo "WARNING: could not sync standby exit $EXIT2_HOST (unreachable?)" >&2
+    echo "ERROR: could not validate/apply standby exit $EXIT2_HOST; local Xray was not restarted" >&2
+    exit 1
   fi
 fi
 
@@ -124,15 +129,18 @@ if [ -n "${RU_HOST:-}" ]; then
     echo "TG_CHAT_ID=${TG_CHAT_ID:-$(cat "$ETC/tg_chat_id" 2>/dev/null || true)}"
     echo "EXIT2_HOST=${EXIT2_HOST:-}"; echo "EXIT2_DOMAIN=${EXIT2_DOMAIN:-}"; echo "NL_IP6=${SERVER_IP6:-}"
     echo "NODE_NAME=${RU_NODE_NAME:-Москва}"; echo "EXIT_NAME=${NODE_NAME:-Амстердам}"; } > "$t3"
-  if scp "${SSHOPT[@]}" -q "$t2" "root@$RU_HOST:/usr/local/etc/xray/config.json" \
+  if scp "${SSHOPT[@]}" -q "$XRAY_DEPLOY" "root@$RU_HOST:/usr/local/bin/xray-safe-apply.py" \
+     && scp "${SSHOPT[@]}" -q "$TPL/xray-safe-start.conf" "root@$RU_HOST:/etc/systemd/system/xray.service.d/20-safechill-preflight.conf" \
+     && scp "${SSHOPT[@]}" -q "$t2" "root@$RU_HOST:/root/safechill-xray-next.json" \
      && scp "${SSHOPT[@]}" -q "$t3" "root@$RU_HOST:/etc/safechill/ru.env" \
      && scp "${SSHOPT[@]}" -q "$TPL/journald-99-safechill.conf" "root@$RU_HOST:/tmp/journald-safechill.conf" \
      && scp "${SSHOPT[@]}" -q "$tf2b" "root@$RU_HOST:/tmp/safechill-f2b.local" \
      && ssh "${SSHOPT[@]}" "root@$RU_HOST" "install -d /etc/systemd/journald.conf.d && install -m644 /tmp/journald-safechill.conf /etc/systemd/journald.conf.d/99-safechill.conf && systemctl restart systemd-journald && { if [ -d /etc/fail2ban ]; then install -d /etc/fail2ban/jail.d && install -m644 /tmp/safechill-f2b.local /etc/fail2ban/jail.d/safechill.local && { systemctl reload fail2ban 2>/dev/null || true; }; fi; }" \
-     && ssh "${SSHOPT[@]}" "root@$RU_HOST" "chmod 644 /usr/local/etc/xray/config.json; chmod 600 /etc/safechill/ru.env; systemctl restart xray && systemctl is-active xray" >/dev/null; then
+     && ssh "${SSHOPT[@]}" "root@$RU_HOST" "chmod 600 /etc/safechill/ru.env; chmod 755 /usr/local/bin/xray-safe-apply.py; systemctl daemon-reload; xray-safe-apply.py apply /root/safechill-xray-next.json && rm -f /root/safechill-xray-next.json"; then
     echo "pushed RU relay config to $RU_HOST ($n_users users${EXIT2_HOST:+, balancer -> $EXIT2_HOST on failure}), xray restarted there"
   else
-    echo "WARNING: could not push config to RU node $RU_HOST (unreachable?) — exit node is fine" >&2
+    echo "ERROR: could not validate/apply RU node $RU_HOST; local Xray was not restarted" >&2
+    exit 1
   fi
   rm -f "$t3"
 fi

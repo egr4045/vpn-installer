@@ -1,0 +1,10 @@
+/var/log/safechill-probes.jsonl {
+    su root root
+    daily
+    maxsize 5M
+    rotate 14
+    compress
+    missingok
+    notifempty
+    create 0640 root root
+}
